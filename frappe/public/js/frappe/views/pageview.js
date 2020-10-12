@@ -1,5 +1,6 @@
 // Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 // MIT License. See license.txt
+import Desktop from './desktop/desktop.js';
 
 frappe.provide('frappe.views.pageview');
 frappe.provide("frappe.standard_pages");
@@ -14,7 +15,7 @@ frappe.views.pageview = {
 			return;
 		}
 
-		if((locals.Page && locals.Page[name]) || name==window.page_name) {
+		if((locals.Page && locals.Page[name] && locals.Page[name].script) || name==window.page_name) {
 			// already loaded
 			callback();
 		} else if(localStorage["_page:" + name] && frappe.boot.developer_mode!=1) {
@@ -36,9 +37,27 @@ frappe.views.pageview = {
 			});
 		}
 	},
+
 	show: function(name) {
 		if(!name) {
 			name = (frappe.boot ? frappe.boot.home_page : window.page_name);
+
+			if(name === "workspace") {
+				if(!frappe.workspace) {
+					let page = frappe.container.add_page('workspace');
+					let container = $('<div class="container"></div>').appendTo(page);
+					container = $('<div></div>').appendTo(container);
+
+					frappe.workspace = new Desktop({
+						wrapper: container
+					})
+				}
+
+				frappe.container.change_to('workspace');
+				frappe.workspace.route();
+				frappe.utils.set_title(__('Desk'));
+				return;
+			}
 		}
 		frappe.model.with_doctype("Page", function() {
 			frappe.views.pageview.with_page(name, function(r) {
@@ -52,10 +71,10 @@ frappe.views.pageview = {
 			});
 		});
 	}
-}
+};
 
 frappe.views.Page = Class.extend({
-	init: function(name, wrapper) {
+	init: function(name) {
 		this.name = name;
 		var me = this;
 		// web home page
@@ -79,13 +98,15 @@ frappe.views.Page = Class.extend({
 				this.wrapper.innerHTML = this.pagedoc.content;
 			frappe.dom.eval(this.pagedoc.__script || this.pagedoc.script || '');
 			frappe.dom.set_style(this.pagedoc.style || '');
+
+			// set breadcrumbs
+			frappe.breadcrumbs.add(this.pagedoc.module || null);
 		}
 
 		this.trigger_page_event('on_page_load');
-
 		// set events
 		$(this.wrapper).on('show', function() {
-			cur_frm = null;
+			window.cur_frm = null;
 			me.trigger_page_event('on_page_show');
 			me.trigger_page_event('refresh');
 		});
@@ -96,7 +117,7 @@ frappe.views.Page = Class.extend({
 			me.wrapper[eventname](me.wrapper);
 		}
 	}
-})
+});
 
 frappe.show_not_found = function(page_name) {
 	frappe.show_message_page({
@@ -104,7 +125,7 @@ frappe.show_not_found = function(page_name) {
 		message: __("Sorry! I could not find what you were looking for."),
 		img: "/assets/frappe/images/ui/bubble-tea-sorry.svg"
 	});
-}
+};
 
 frappe.show_not_permitted = function(page_name) {
 	frappe.show_message_page({
@@ -113,7 +134,7 @@ frappe.show_not_permitted = function(page_name) {
 		img: "/assets/frappe/images/ui/bubble-tea-sorry.svg",
 		// icon: "octicon octicon-circle-slash"
 	});
-}
+};
 
 frappe.show_message_page = function(opts) {
 	// opts can include `page_name`, `message`, `icon` or `img`
@@ -136,11 +157,11 @@ frappe.show_message_page = function(opts) {
 				<a class="btn btn-default btn-sm btn-home" href="#">%(home)s</a>\
 			</div>\
 		</div>', {
-			img: opts.img || "",
-			message: opts.message || "",
-			home: __("Home")
-		})
+				img: opts.img || "",
+				message: opts.message || "",
+				home: __("Home")
+			})
 	);
 
 	frappe.container.change_to(opts.page_name);
-}
+};

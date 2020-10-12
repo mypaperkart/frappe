@@ -3,11 +3,20 @@
 from __future__ import unicode_literals
 
 import redis, frappe, re
-import cPickle as pickle
+from six.moves import cPickle as pickle
 from frappe.utils import cstr
+from six import iteritems
+
 
 class RedisWrapper(redis.Redis):
 	"""Redis client that will automatically prefix conf.db_name"""
+	def connected(self):
+		try:
+			self.ping()
+			return True
+		except redis.exceptions.ConnectionError:
+			return False
+
 	def make_key(self, key, user=None, shared=False):
 		if shared:
 			return key
@@ -34,7 +43,7 @@ class RedisWrapper(redis.Redis):
 
 		try:
 			if expires_in_sec:
-				self.setex(key, pickle.dumps(val), expires_in_sec)
+				self.setex(name=key, time=expires_in_sec, value=pickle.dumps(val))
 			else:
 				self.set(key, pickle.dumps(val))
 
@@ -90,7 +99,7 @@ class RedisWrapper(redis.Redis):
 
 		except redis.exceptions.ConnectionError:
 			regex = re.compile(cstr(key).replace("|", "\|").replace("*", "[\w]*"))
-			return [k for k in frappe.local.cache.keys() if regex.match(k)]
+			return [k for k in list(frappe.local.cache) if regex.match(k.decode())]
 
 	def delete_keys(self, key):
 		"""Delete keys with wildcard `*`."""
@@ -120,18 +129,27 @@ class RedisWrapper(redis.Redis):
 				pass
 
 	def lpush(self, key, value):
-		super(redis.Redis, self).lpush(self.make_key(key), value)
+		super(RedisWrapper, self).lpush(self.make_key(key), value)
 
 	def rpush(self, key, value):
-		super(redis.Redis, self).rpush(self.make_key(key), value)
+		super(RedisWrapper, self).rpush(self.make_key(key), value)
 
 	def lpop(self, key):
-		return super(redis.Redis, self).lpop(self.make_key(key))
+		return super(RedisWrapper, self).lpop(self.make_key(key))
 
 	def llen(self, key):
-		return super(redis.Redis, self).llen(self.make_key(key))
+		return super(RedisWrapper, self).llen(self.make_key(key))
+
+	def lrange(self, key, start, stop):
+		return super(RedisWrapper, self).lrange(self.make_key(key), start, stop)
+
+	def ltrim(self, key, start, stop):
+		return super(RedisWrapper, self).ltrim(self.make_key(key), start, stop)
 
 	def hset(self, name, key, value, shared=False):
+		if key is None:
+			return
+
 		_name = self.make_key(name, shared=shared)
 
 		# set in local
@@ -141,26 +159,28 @@ class RedisWrapper(redis.Redis):
 
 		# set in redis
 		try:
-			super(redis.Redis, self).hset(_name,
+			super(RedisWrapper, self).hset(_name,
 				key, pickle.dumps(value))
 		except redis.exceptions.ConnectionError:
 			pass
 
 	def hgetall(self, name):
 		return {key: pickle.loads(value) for key, value in
-			super(redis.Redis, self).hgetall(self.make_key(name)).iteritems()}
+			iteritems(super(RedisWrapper, self).hgetall(self.make_key(name)))}
 
 	def hget(self, name, key, generator=None, shared=False):
 		_name = self.make_key(name, shared=shared)
 		if not _name in frappe.local.cache:
 			frappe.local.cache[_name] = {}
 
+		if not key: return None
+
 		if key in frappe.local.cache[_name]:
 			return frappe.local.cache[_name][key]
 
 		value = None
 		try:
-			value = super(redis.Redis, self).hget(_name, key)
+			value = super(RedisWrapper, self).hget(_name, key)
 		except redis.exceptions.ConnectionError:
 			pass
 
@@ -182,7 +202,7 @@ class RedisWrapper(redis.Redis):
 			if key in frappe.local.cache[_name]:
 				del frappe.local.cache[_name][key]
 		try:
-			super(redis.Redis, self).hdel(_name, key)
+			super(RedisWrapper, self).hdel(_name, key)
 		except redis.exceptions.ConnectionError:
 			pass
 
@@ -194,8 +214,31 @@ class RedisWrapper(redis.Redis):
 
 	def hkeys(self, name):
 		try:
-			return super(redis.Redis, self).hkeys(self.make_key(name))
+			return super(RedisWrapper, self).hkeys(self.make_key(name))
 		except redis.exceptions.ConnectionError:
 			return []
 
+	def sadd(self, name, *values):
+		"""Add a member/members to a given set"""
+		super(RedisWrapper, self).sadd(self.make_key(name), *values)
+
+	def srem(self, name, *values):
+		"""Remove a specific member/list of members from the set"""
+		super(RedisWrapper, self).srem(self.make_key(name), *values)
+
+	def sismember(self, name, value):
+		"""Returns True or False based on if a given value is present in the set"""
+		return super(RedisWrapper, self).sismember(self.make_key(name), value)
+
+	def spop(self, name):
+		"""Removes and returns a random member from the set"""
+		return super(RedisWrapper, self).spop(self.make_key(name))
+
+	def srandmember(self, name, count=None):
+		"""Returns a random member from the set"""
+		return super(RedisWrapper, self).srandmember(self.make_key(name))
+
+	def smembers(self, name):
+		"""Return all members of the set"""
+		return super(RedisWrapper, self).smembers(self.make_key(name))
 

@@ -4,6 +4,7 @@
 // route urls to their virtual pages
 
 // re-route map (for rename)
+frappe.provide('frappe.views');
 frappe.re_route = {"#login": ""};
 frappe.route_titles = {};
 frappe.route_flags = {};
@@ -11,8 +12,13 @@ frappe.route_history = [];
 frappe.view_factory = {};
 frappe.view_factories = [];
 frappe.route_options = null;
+frappe.route_hooks = {};
 
 frappe.route = function() {
+
+	// Application is not yet initiated
+	if (!frappe.app) return;
+
 	if(frappe.re_route[window.location.hash] !== undefined) {
 		// after saving a doc, for example,
 		// "New DocType 1" and the renamed "TestDocType", both exist in history
@@ -39,16 +45,29 @@ frappe.route = function() {
 
 	frappe.route_history.push(route);
 
-	if(route[0] && route[1] && frappe.views[route[0] + "Factory"]) {
-		// has a view generator, generate!
-		if(!frappe.view_factory[route[0]]) {
-			frappe.view_factory[route[0]] = new frappe.views[route[0] + "Factory"]();
+	if(route[0]) {
+		const title_cased_route = frappe.utils.to_title_case(route[0]);
+		if (title_cased_route === 'Workspace') {
+			frappe.views.pageview.show('');
 		}
 
-		frappe.view_factory[route[0]].show();
+		if (route[1] && frappe.views[title_cased_route + "Factory"]) {
+			// has a view generator, generate!
+			if(!frappe.view_factory[title_cased_route]) {
+				frappe.view_factory[title_cased_route] = new frappe.views[title_cased_route + "Factory"]();
+			}
+
+			frappe.view_factory[title_cased_route].show();
+		} else {
+			// show page
+			const route_name = frappe.utils.xss_sanitise(route[0]);
+			if (frappe.views.pageview) {
+				frappe.views.pageview.show(route_name);
+			}
+		}
 	} else {
-		// show page
-		frappe.views.pageview.show(route[0]);
+		// Show desk
+		frappe.views.pageview.show('');
 	}
 
 
@@ -67,11 +86,19 @@ frappe.route = function() {
 
 frappe.get_route = function(route) {
 	// for app
-	var route = frappe.get_route_str(route).split('/')
-	var parts = route[route.length - 1].split("?");
-	route[route.length - 1] = parts[0];
+	route = frappe.get_raw_route_str(route).split('/');
+	route = $.map(route, frappe._decode_str);
+	var parts = null;
+	var doc_name = route[route.length - 1];
+	// if the last part contains ? then check if it is valid query string
+	if(doc_name.indexOf("?") < doc_name.indexOf("=")){
+		parts = doc_name.split("?");
+		route[route.length - 1] = parts[0];
+	} else {
+		parts = doc_name;
+	}
 	if (parts.length > 1) {
-		var query_params = get_query_params(parts[1]);
+		var query_params = frappe.utils.get_query_params(parts[1]);
 		frappe.route_options = $.extend(frappe.route_options || {}, query_params);
 	}
 
@@ -92,48 +119,66 @@ frappe.get_prev_route = function() {
 	}
 }
 
-frappe.get_route_str = function(route) {
+frappe._decode_str = function(r) {
+	try {
+		return decodeURIComponent(r);
+	} catch(e) {
+		if (e instanceof URIError) {
+			return r;
+		} else {
+			throw e;
+		}
+	}
+}
+
+frappe.get_raw_route_str = function(route) {
 	if(!route)
 		route = window.location.hash;
 
 	if(route.substr(0,1)=='#') route = route.substr(1);
 	if(route.substr(0,1)=='!') route = route.substr(1);
 
-	route = $.map(route.split('/'), function(r) {
-		try {
-			return decodeURIComponent(r);
-		} catch(e) {
-			if (e instanceof URIError) {
-				return r;
-			} else {
-				throw e;
-			}
-		}
+	return route;
+}
 
-	}).join('/');
+frappe.get_route_str = function(route) {
+	var rawRoute = frappe.get_raw_route_str(route);
+	route = $.map(rawRoute.split('/'), frappe._decode_str).join('/');
 
 	return route;
 }
 
 frappe.set_route = function() {
-	var params = arguments;
-	if(params.length===1 && $.isArray(params[0])) {
-		params = params[0];
-	}
-	var route = $.map(params, function(a) {
-		if($.isPlainObject(a)) {
-			frappe.route_options = a;
-			return null;
-		} else {
-			return a;
-			// return a ? encodeURIComponent(a) : null;
+	return new Promise(resolve => {
+		var params = arguments;
+		if(params.length===1 && $.isArray(params[0])) {
+			params = params[0];
 		}
-	}).join('/');
+		var route = $.map(params, function(a) {
+			if($.isPlainObject(a)) {
+				frappe.route_options = a;
+				return null;
+			} else {
+				a = String(a);
+				if (a && a.match(/[%'"]/)) {
+					// if special chars, then encode
+					a = encodeURIComponent(a);
+				}
+				return a;
+			}
+		}).join('/');
 
-	window.location.hash = route;
+		window.location.hash = route;
 
-	// Set favicon (app.js)
-	frappe.app.set_favicon && frappe.app.set_favicon();
+		// Set favicon (app.js)
+		frappe.provide('frappe.app');
+		frappe.app.set_favicon && frappe.app.set_favicon();
+		setTimeout(() => {
+			frappe.after_ajax && frappe.after_ajax(() => {
+				resolve();
+			});
+		}, 100);
+	});
 }
 
 frappe.set_re_route = function() {
@@ -142,6 +187,9 @@ frappe.set_re_route = function() {
 	frappe.re_route[tmp] = window.location.hash;
 };
 
+frappe.has_route_options = function() {
+	return Boolean(Object.keys(frappe.route_options || {}).length);
+}
 
 frappe._cur_route = null;
 
@@ -153,10 +201,17 @@ $(window).on('hashchange', function() {
 		return;
 
 	// hide open dialog
-	if(cur_dialog && cur_dialog.hide_on_page_refresh) {
-		cur_dialog.hide();
+	if(window.cur_dialog) {
+		if (!cur_dialog.minimizable) {
+			cur_dialog.hide();
+		} else if (!cur_dialog.is_minimized) {
+			cur_dialog.toggle_minimize();
+		}
 	}
 
 	frappe.route();
 
+	frappe.route.trigger('change');
 });
+
+frappe.utils.make_event_emitter(frappe.route);

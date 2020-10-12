@@ -43,6 +43,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -66,6 +67,8 @@
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
   "currency_symbol": "$",
+  "currency_name": "Eastern Carribean Dollar",
+  "currency": "XCD",
   "number_format": "#,###.##",
   "timezones": [
    "America/Anguilla"
@@ -92,6 +95,8 @@
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
   "currency_symbol": "$",
+  "currency_name": "Eastern Carribean Dollar",
+  "currency": "XCD",
   "number_format": "#,###.##",
   "timezones": [
    "America/Antigua"
@@ -172,6 +177,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -248,6 +254,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -269,9 +276,11 @@
  },
  "Benin": {
   "code": "bj",
+  "currency": "XOF",
+  "currency_name": "West African CFA Franc",
+  "currency_symbol": "CFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Porto-Novo"
@@ -386,6 +395,8 @@
  },
  "Bulgaria": {
   "code": "bg",
+  "currency": "BGN",
+  "currency_name": "Bulgarian Lev",
   "currency_fraction": "Stotinka",
   "currency_fraction_units": 100,
   "currency_symbol": "\u043b\u0432",
@@ -396,9 +407,11 @@
  },
  "Burkina Faso": {
   "code": "bf",
+  "currency": "XOF",
+  "currency_name": "West African CFA Franc",
+  "currency_symbol": "CFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Ouagadougou"
@@ -430,9 +443,11 @@
  },
  "Cameroon": {
   "code": "cm",
+  "currency": "XAF",
+  "currency_name": "Central African CFA Franc",
+  "currency_symbol": "FCFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Douala"
@@ -504,9 +519,11 @@
  },
  "Central African Republic": {
   "code": "cf",
+  "currency": "XAF",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
+  "currency_name": "Central African CFA Franc",
+  "currency_symbol": "FCFA",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Bangui"
@@ -514,9 +531,11 @@
  },
  "Chad": {
   "code": "td",
+  "currency": "XAF",
+  "currency_name": "Central African CFA Franc",
+  "currency_symbol": "FCFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Ndjamena"
@@ -592,11 +611,21 @@
  },
  "Congo": {
   "code": "cg",
-  "number_format": "#,###.##"
+  "number_format": "#,###.##",
+  "currency": "XAF",
+  "currency_name": "Central African CFA Franc",
+  "currency_symbol": "FCFA",
+  "currency_fraction": "Centime",
+  "currency_fraction_units": 100
  },
  "Congo, The Democratic Republic of the": {
   "code": "cd",
-  "number_format": "#,###.##"
+  "number_format": "#,###.##",
+  "currency": "CDF",
+  "currency_name": "Congolese franc",
+  "currency_symbol": "FC",
+  "currency_fraction": "Centime",
+  "currency_fraction_units": 100
  },
  "Cook Islands": {
   "code": "ck",
@@ -704,6 +733,8 @@
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
   "currency_symbol": "$",
+  "currency_name": "Eastern Carribean Dollar",
+  "currency": "XCD",
   "number_format": "#,###.##",
   "timezones": [
    "America/Dominica"
@@ -746,11 +777,13 @@
  },
  "El Salvador": {
   "code": "sv",
-  "currency": "SVC",
+  "currency": "USD",
   "currency_fraction": "Centavo",
   "currency_fraction_units": 100,
-  "currency_name": "El Salvador Colon",
-  "currency_symbol": "\u20a1",
+  "smallest_currency_fraction_value": 0.01,
+  "currency_name": "Dolar estadounidense",
+  "currency_symbol": "$",
+  "date_format": "dd-mm-yyyy",
   "number_format": "#,###.##",
   "timezones": [
    "America/El_Salvador"
@@ -758,9 +791,11 @@
  },
  "Equatorial Guinea": {
   "code": "gq",
+  "currency": "XAF",
+  "currency_name": "Central African CFA Franc",
+  "currency_symbol": "FCFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Malabo"
@@ -780,10 +815,10 @@
  },
  "Estonia": {
   "code": "ee",
-  "currency": "EEK",
+  "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
-  "currency_name": "Kroon",
+  "currency_name": "Euro",
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -792,6 +827,7 @@
  },
  "Ethiopia": {
   "code": "et",
+  "currency": "ETB",
   "currency_fraction": "Santim",
   "currency_fraction_units": 100,
   "currency_name": "Ethiopian Birr",
@@ -834,6 +870,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -845,6 +882,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "# ###,##",
   "date_format": "dd/mm/yyyy",
@@ -877,9 +915,11 @@
  },
  "Gabon": {
   "code": "ga",
+  "currency": "XAF",
+  "currency_name": "Central African CFA Franc",
+  "currency_symbol": "FCFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Libreville"
@@ -909,6 +949,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -943,6 +984,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -964,6 +1006,8 @@
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
   "currency_symbol": "$",
+  "currency_name": "Eastern Carribean Dollar",
+  "currency": "XCD",
   "number_format": "#,###.##",
   "timezones": [
    "America/Grenada"
@@ -1019,9 +1063,11 @@
  },
  "Guinea-Bissau": {
   "code": "gw",
+  "currency": "XOF",
+  "currency_name": "West African CFA Franc",
+  "currency_symbol": "CFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Bissau"
@@ -1163,6 +1209,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -1196,6 +1243,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#.###,##",
   "date_format": "dd/mm/yyyy",
@@ -1205,10 +1253,15 @@
  },
  "Ivory Coast": {
   "code": "ci",
+  "currency": "XOF",
+  "currency_name": "West African CFA Franc",
+  "currency_symbol": "CFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
-  "number_format": "#,###.##"
+  "number_format": "#,###.##",
+  "timeszones": [
+   "Africa/Abidjan"
+  ]
  },
  "Jamaica": {
   "code": "jm",
@@ -1426,6 +1479,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -1496,9 +1550,11 @@
  },
  "Mali": {
   "code": "ml",
+  "currency": "XOF",
+  "currency_name": "West African CFA Franc",
+  "currency_symbol": "CFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Bamako"
@@ -1603,6 +1659,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -1629,6 +1686,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -1640,6 +1698,8 @@
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
   "currency_symbol": "$",
+  "currency_name": "Eastern Carribean Dollar",
+  "currency": "XCD",
   "number_format": "#,###.##",
   "timezones": [
    "America/Montserrat"
@@ -1659,9 +1719,10 @@
  },
  "Mozambique": {
   "code": "mz",
+  "currency": "MZN",
   "currency_fraction": "Centavo",
   "currency_fraction_units": 100,
-  "currency_symbol": "MT",
+  "currency_symbol": "MZN",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Maputo"
@@ -1715,6 +1776,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -1758,9 +1820,11 @@
  },
  "Niger": {
   "code": "ne",
+  "currency": "XOF",
+  "currency_name": "West African CFA Franc",
+  "currency_symbol": "CFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Niamey"
@@ -1935,6 +1999,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -2011,6 +2076,8 @@
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
   "currency_symbol": "$",
+  "currency_name": "Eastern Carribean Dollar",
+  "currency": "XCD",
   "number_format": "#,###.##",
   "timezones": [
    "America/St_Kitts"
@@ -2021,6 +2088,8 @@
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
   "currency_symbol": "$",
+  "currency_name": "Eastern Carribean Dollar",
+  "currency": "XCD",
   "number_format": "#,###.##",
   "timezones": [
    "America/St_Lucia"
@@ -2039,6 +2108,8 @@
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
   "currency_symbol": "$",
+  "currency_name": "Eastern Carribean Dollar",
+  "currency": "XCD",
   "number_format": "#,###.##",
   "timezones": [
    "America/St_Vincent"
@@ -2061,6 +2132,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -2087,9 +2159,11 @@
  },
  "Senegal": {
   "code": "sn",
+  "currency": "XOF",
+  "currency_name": "West African CFA Franc",
+  "currency_symbol": "CFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Dakar"
@@ -2152,6 +2226,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -2163,6 +2238,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -2228,6 +2304,7 @@
   "currency": "EUR",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
   "currency_symbol": "\u20ac",
   "number_format": "#,###.##",
   "timezones": [
@@ -2260,6 +2337,7 @@
  },
  "Suriname": {
   "code": "sr",
+  "currency": "SRD",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
   "currency_symbol": "$",
@@ -2355,9 +2433,11 @@
  },
  "Togo": {
   "code": "tg",
+  "currency": "XOF",
+  "currency_name": "West African CFA Franc",
+  "currency_symbol": "CFA",
   "currency_fraction": "Centime",
   "currency_fraction_units": 100,
-  "currency_symbol": "Fr",
   "number_format": "#,###.##",
   "timezones": [
    "Africa/Lome"
@@ -2502,7 +2582,7 @@
   "currency": "USD",
   "currency_fraction": "Cent",
   "currency_fraction_units": 100,
-  "smallest_currency_fraction_value": 0.05,
+  "smallest_currency_fraction_value": 0.01,
   "currency_name": "US Dollar",
   "currency_symbol": "$",
   "date_format": "mm-dd-yyyy",
@@ -2619,8 +2699,11 @@
  },
  "Yemen": {
   "code": "ye",
+  "currency": "YER",
   "currency_fraction": "Fils",
   "currency_fraction_units": 100,
+  "smallest_currency_fraction_value": 0.01,
+  "currency_name": "Yemeni Rial",
   "currency_symbol": "\ufdfc",
   "number_format": "#,###.##",
   "timezones": [

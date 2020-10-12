@@ -1,8 +1,9 @@
+from __future__ import unicode_literals
 from PIL import Image, ImageDraw
 from hashlib import md5
 import base64
-import StringIO
 import random
+from six import StringIO
 
 GRID_SIZE = 5
 BORDER_SIZE = 20
@@ -98,7 +99,7 @@ class Identicon(object):
 		bug report: https://github.com/liuzheng712/identicons/issues
 		'''
 		self.calculate()
-		fp = StringIO.StringIO()
+		fp = StringIO()
 		self.image.encoderinfo = {}
 		self.image.encoderconfig = ()
 

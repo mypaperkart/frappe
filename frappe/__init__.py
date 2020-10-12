@@ -6,14 +6,24 @@ globals attached to frappe module
 """
 from __future__ import unicode_literals, print_function
 
+from six import iteritems, binary_type, text_type, string_types, PY2
 from werkzeug.local import Local, release_local
 import os, sys, importlib, inspect, json
+from past.builtins import cmp
+import click
+from faker import Faker
 
 # public
 from .exceptions import *
-from .utils.jinja import get_jenv, get_template, render_template
+from .utils.jinja import (get_jenv, get_template, render_template, get_email_from_template, get_jloader)
 
-__version__ = '8.0.69'
+# Harmless for Python 3
+# For Python 2 set default encoding to utf-8
+if PY2:
+	reload(sys)
+	sys.setdefaultencoding("utf-8")
+
+__version__ = '13.0.0-dev'
 __title__ = "Frappe Framework"
 
 local = Local()
@@ -38,9 +48,14 @@ class _dict(dict):
 	def copy(self):
 		return _dict(dict(self).copy())
 
-def _(msg, lang=None):
-	"""Returns translated string in current lang, if exists."""
+def _(msg, lang=None, context=None):
+	"""Returns translated string in current lang, if exists.
+		Usage:
+			_('Change')
+			_('Change', context='Coins')
+	"""
 	from frappe.translate import get_full_dict
+	from frappe.utils import strip_html_tags, is_html
 
 	if not hasattr(local, 'lang'):
 		local.lang = lang or 'en'
@@ -48,22 +63,35 @@ def _(msg, lang=None):
 	if not lang:
 		lang = local.lang
 
+	non_translated_string = msg
+
+	if is_html(msg):
+		msg = strip_html_tags(msg)
+
 	# msg should always be unicode
 	msg = as_unicode(msg).strip()
 
+	translated_string = ''
+	if context:
+		string_key = '{msg}:{context}'.format(msg=msg, context=context)
+		translated_string = get_full_dict(lang).get(string_key)
+
+	if not translated_string:
+		translated_string = get_full_dict(lang).get(msg)
+
 	# return lang_full_dict according to lang passed parameter
-	return get_full_dict(lang).get(msg) or msg
+	return translated_string or non_translated_string
 
 def as_unicode(text, encoding='utf-8'):
 	'''Convert to unicode if required'''
-	if isinstance(text, unicode):
+	if isinstance(text, text_type):
 		return text
 	elif text==None:
 		return ''
-	elif isinstance(text, basestring):
-		return unicode(text, encoding)
+	elif isinstance(text, binary_type):
+		return text_type(text, encoding)
 	else:
-		return unicode(text)
+		return text_type(text)
 
 def get_lang_dict(fortype, name=None):
 	"""Returns the translated language dict for the given type and name.
@@ -107,7 +135,6 @@ def init(site, sites_path=None, new_site=False):
 	local.debug_log = []
 	local.realtime_log = []
 	local.flags = _dict({
-		"ran_schedulers": [],
 		"currently_saving": [],
 		"redirect_location": "",
 		"in_install_db": False,
@@ -126,6 +153,7 @@ def init(site, sites_path=None, new_site=False):
 	local.site = site
 	local.sites_path = sites_path
 	local.site_path = os.path.join(sites_path, site)
+	local.all_apps = None
 
 	local.request_ip = None
 	local.response = _dict({"docs":[]})
@@ -137,7 +165,7 @@ def init(site, sites_path=None, new_site=False):
 
 	local.module_app = None
 	local.app_modules = None
-	local.system_settings = None
+	local.system_settings = _dict()
 
 	local.user = None
 	local.user_perms = None
@@ -145,12 +173,16 @@ def init(site, sites_path=None, new_site=False):
 	local.role_permissions = {}
 	local.valid_columns = {}
 	local.new_doc_templates = {}
+	local.link_count = {}
 
 	local.jenv = None
 	local.jloader =None
 	local.cache = {}
+	local.document_cache = {}
+	local.meta_cache = {}
 	local.form_dict = _dict()
 	local.session = _dict()
+	local.dev_server = os.environ.get('DEV_SERVER', False)
 
 	setup_module_map()
 
@@ -161,11 +193,27 @@ def connect(site=None, db_name=None):
 
 	:param site: If site is given, calls `frappe.init`.
 	:param db_name: Optional. Will use from `site_config.json`."""
-	from database import Database
+	from frappe.database import get_db
 	if site:
 		init(site)
-	local.db = Database(user=db_name or local.conf.db_name)
+
+	local.db = get_db(user=db_name or local.conf.db_name)
 	set_user("Administrator")
+
+def connect_replica():
+	from frappe.database import get_db
+	user = local.conf.db_name
+	password = local.conf.db_password
+
+	if local.conf.different_credentials_for_replica:
+		user = local.conf.replica_db_name
+		password = local.conf.replica_db_password
+
+	local.replica_db = get_db(host=local.conf.replica_host, user=user, password=password)
+
+	# swap db connections
+	local.primary_db = local.db
+	local.db = local.replica_db
 
 def get_site_config(sites_path=None, site_path=None):
 	"""Returns `site_config.json` combined with `sites/common_site_config.json`.
@@ -178,16 +226,22 @@ def get_site_config(sites_path=None, site_path=None):
 	if sites_path:
 		common_site_config = os.path.join(sites_path, "common_site_config.json")
 		if os.path.exists(common_site_config):
-			config.update(get_file_json(common_site_config))
+			try:
+				config.update(get_file_json(common_site_config))
+			except Exception as error:
+				click.secho("common_site_config.json is invalid", fg="red")
+				print(error)
 
 	if site_path:
 		site_config = os.path.join(site_path, "site_config.json")
 		if os.path.exists(site_config):
-			config.update(get_file_json(site_config))
+			try:
+				config.update(get_file_json(site_config))
+			except Exception as error:
+				click.secho("{0}/site_config.json is invalid".format(local.site), fg="red")
+				print(error)
 		elif local.site and not local.flags.new_site:
-			print("{0} does not exist".format(local.site))
-			sys.exit(1)
-			#raise IncorrectSitePath, "{0} does not exist".format(site_config)
+			raise IncorrectSitePath("{0} does not exist".format(local.site))
 
 	return _dict(config)
 
@@ -222,7 +276,7 @@ def destroy():
 # memcache
 redis_server = None
 def cache():
-	"""Returns memcache connection."""
+	"""Returns redis connection."""
 	global redis_server
 	if not redis_server:
 		from frappe.utils.redis_wrapper import RedisWrapper
@@ -232,8 +286,8 @@ def cache():
 
 def get_traceback():
 	"""Returns error traceback."""
-	import utils
-	return utils.get_traceback()
+	from frappe.utils import get_traceback
+	return get_traceback()
 
 def errprint(msg):
 	"""Log error. This is sent back as `exc` in response.
@@ -241,9 +295,12 @@ def errprint(msg):
 	:param msg: Message."""
 	msg = as_unicode(msg)
 	if not request or (not "cmd" in local.form_dict) or conf.developer_mode:
-		print(msg.encode('utf-8'))
+		print(msg)
 
-	error_log.append(msg)
+	error_log.append({"exc": msg})
+
+def print_sql(enable=True):
+	return cache().set_value('flag_print_sql', enable)
 
 def log(msg):
 	"""Add to `debug_log`.
@@ -255,7 +312,7 @@ def log(msg):
 
 	debug_log.append(as_unicode(msg))
 
-def msgprint(msg, title=None, raise_exception=0, as_table=False, indicator=None, alert=False):
+def msgprint(msg, title=None, raise_exception=0, as_table=False, indicator=None, alert=False, primary_action=None, is_minimizable=None, wide=None):
 	"""Print a message to the user (via HTTP response).
 	Messages are sent in the `__server_messages` property in the
 	response JSON and shown in a pop-up / modal.
@@ -264,9 +321,13 @@ def msgprint(msg, title=None, raise_exception=0, as_table=False, indicator=None,
 	:param title: [optional] Message title.
 	:param raise_exception: [optional] Raise given exception and show message.
 	:param as_table: [optional] If `msg` is a list of lists, render as HTML table.
+	:param primary_action: [optional] Bind a primary server/client side action.
+	:param is_minimizable: [optional] Allow users to minimize the modal
+	:param wide: [optional] Show wide modal
 	"""
-	from utils import encode
+	from frappe.utils import encode
 
+	msg = safe_decode(msg)
 	out = _dict(message=msg)
 
 	def _raise_exception():
@@ -276,19 +337,28 @@ def msgprint(msg, title=None, raise_exception=0, as_table=False, indicator=None,
 			import inspect
 
 			if inspect.isclass(raise_exception) and issubclass(raise_exception, Exception):
-				raise raise_exception, encode(msg)
+				raise raise_exception(msg)
 			else:
-				raise ValidationError, encode(msg)
+				raise ValidationError(msg)
 
 	if flags.mute_messages:
 		_raise_exception()
 		return
 
 	if as_table and type(msg) in (list, tuple):
-		out.msg = '<table border="1px" style="border-collapse: collapse" cellpadding="2px">' + ''.join(['<tr>'+''.join(['<td>%s</td>' % c for c in r])+'</tr>' for r in msg]) + '</table>'
 
-	if flags.print_messages and out.msg:
-		print("Message: " + repr(out.msg).encode("utf-8"))
+		table_rows = ''
+		for row in msg:
+			table_row_data = ''
+			for data in row:
+				table_row_data += '<td>{}</td>'.format(data)
+			table_rows += '<tr>{}</tr>'.format(table_row_data)
+
+		out.message = '''<table class="table table-bordered"
+			style="margin: 0;">{}</table>'''.format(table_rows)
+
+	if flags.print_messages and out.message:
+		print(f"Message: {repr(out.message).encode('utf-8')}")
 
 	if title:
 		out.title = title
@@ -299,24 +369,50 @@ def msgprint(msg, title=None, raise_exception=0, as_table=False, indicator=None,
 	if indicator:
 		out.indicator = indicator
 
+	if is_minimizable:
+		out.is_minimizable = is_minimizable
+
 	if alert:
 		out.alert = 1
 
+	if raise_exception:
+		out.raise_exception = 1
+
+	if primary_action:
+		out.primary_action = primary_action
+
+	if wide:
+		out.wide = wide
+
 	message_log.append(json.dumps(out))
+
+	if raise_exception and hasattr(raise_exception, '__name__'):
+		local.response['exc_type'] = raise_exception.__name__
+
 	_raise_exception()
 
 def clear_messages():
 	local.message_log = []
 
-def throw(msg, exc=ValidationError, title=None):
+def get_message_log():
+	log = []
+	for msg_out in local.message_log:
+		log.append(json.loads(msg_out))
+
+	return log
+
+def clear_last_message():
+	if len(local.message_log) > 0:
+		local.message_log = local.message_log[:-1]
+
+def throw(msg, exc=ValidationError, title=None, is_minimizable=None, wide=None):
 	"""Throw execption and show message (`msgprint`).
 
 	:param msg: Message.
 	:param exc: Exception class. Default `frappe.ValidationError`"""
-	msgprint(msg, raise_exception=exc, title=title, indicator='red')
+	msgprint(msg, raise_exception=exc, title=title, indicator='red', is_minimizable=is_minimizable, wide=wide)
 
 def emit_js(js, user=False, **kwargs):
-	from frappe.async import publish_realtime
 	if user == False:
 		user = session.user
 	publish_realtime('eval_js', js, user=user, **kwargs)
@@ -357,12 +453,8 @@ def get_roles(username=None):
 	"""Returns roles of current user."""
 	if not local.session:
 		return ["Guest"]
-
-	if username:
-		import frappe.permissions
-		return frappe.permissions.get_roles(username)
-	else:
-		return get_user().get_roles()
+	import frappe.permissions
+	return frappe.permissions.get_roles(username or local.session.user)
 
 def get_request_header(key, default=None):
 	"""Return HTTP request header.
@@ -375,13 +467,14 @@ def sendmail(recipients=[], sender="", subject="No Subject", message="No Message
 		as_markdown=False, delayed=True, reference_doctype=None, reference_name=None,
 		unsubscribe_method=None, unsubscribe_params=None, unsubscribe_message=None,
 		attachments=None, content=None, doctype=None, name=None, reply_to=None,
-		cc=[], message_id=None, in_reply_to=None, send_after=None, expose_recipients=None,
-		send_priority=1, communication=None, retry=1, now=None, read_receipt=None, is_notification=False):
+		cc=[], bcc=[], message_id=None, in_reply_to=None, send_after=None, expose_recipients=None,
+		send_priority=1, communication=None, retry=1, now=None, read_receipt=None, is_notification=False,
+		inline_images=None, template=None, args=None, header=None, print_letterhead=False):
 	"""Send email using user's default **Email Account** or global default **Email Account**.
 
 
 	:param recipients: List of recipients.
-	:param sender: Email sender. Default is current user.
+	:param sender: Email sender. Default is current user or default outgoing account.
 	:param subject: Email Subject.
 	:param message: (or `content`) Email Content.
 	:param as_markdown: Convert content markdown to HTML.
@@ -398,34 +491,46 @@ def sendmail(recipients=[], sender="", subject="No Subject", message="No Message
 	:param send_after: Send after the given datetime.
 	:param expose_recipients: Display all recipients in the footer message - "This email was sent to"
 	:param communication: Communication link to be set in Email Queue record
+	:param inline_images: List of inline images as {"filename", "filecontent"}. All src properties will be replaced with random Content-Id
+	:param template: Name of html template from templates/emails folder
+	:param args: Arguments for rendering the template
+	:param header: Append header in email
 	"""
+	text_content = None
+	if template:
+		message, text_content = get_email_from_template(template, args)
+
 	message = content or message
 
 	if as_markdown:
-		from markdown2 import markdown
-		message = markdown(message)
+		from frappe.utils import md_to_html
+		message = md_to_html(message)
 
 	if not delayed:
 		now = True
 
-	import email.queue
-	email.queue.send(recipients=recipients, sender=sender,
-		subject=subject, message=message,
+	from frappe.email import queue
+	queue.send(recipients=recipients, sender=sender,
+		subject=subject, message=message, text_content=text_content,
 		reference_doctype = doctype or reference_doctype, reference_name = name or reference_name,
 		unsubscribe_method=unsubscribe_method, unsubscribe_params=unsubscribe_params, unsubscribe_message=unsubscribe_message,
-		attachments=attachments, reply_to=reply_to, cc=cc, message_id=message_id, in_reply_to=in_reply_to,
+		attachments=attachments, reply_to=reply_to, cc=cc, bcc=bcc, message_id=message_id, in_reply_to=in_reply_to,
 		send_after=send_after, expose_recipients=expose_recipients, send_priority=send_priority,
-		communication=communication, now=now, read_receipt=read_receipt, is_notification=is_notification)
+		communication=communication, now=now, read_receipt=read_receipt, is_notification=is_notification,
+		inline_images=inline_images, header=header, print_letterhead=print_letterhead)
 
 whitelisted = []
 guest_methods = []
 xss_safe_methods = []
-def whitelist(allow_guest=False, xss_safe=False):
+allowed_http_methods_for_whitelisted_func = {}
+
+def whitelist(allow_guest=False, xss_safe=False, methods=None):
 	"""
 	Decorator for whitelisting a function and making it accessible via HTTP.
 	Standard request will be `/api/method/[path.to.method]`
 
 	:param allow_guest: Allow non logged-in user to access this method.
+	:param methods: Allowed http method to access the method.
 
 	Use as:
 
@@ -433,9 +538,15 @@ def whitelist(allow_guest=False, xss_safe=False):
 		def myfunc(param1, param2):
 			pass
 	"""
+
+	if not methods:
+		methods = ['GET', 'POST', 'PUT', 'DELETE']
+
 	def innerfn(fn):
-		global whitelisted, guest_methods, xss_safe_methods
+		global whitelisted, guest_methods, xss_safe_methods, allowed_http_methods_for_whitelisted_func
 		whitelisted.append(fn)
+
+		allowed_http_methods_for_whitelisted_func[fn] = methods
 
 		if allow_guest:
 			guest_methods.append(fn)
@@ -447,7 +558,26 @@ def whitelist(allow_guest=False, xss_safe=False):
 
 	return innerfn
 
-def only_for(roles):
+def read_only():
+	def innfn(fn):
+		def wrapper_fn(*args, **kwargs):
+			if conf.read_from_replica:
+				connect_replica()
+
+			try:
+				retval = fn(*args, **get_newargs(fn, kwargs))
+			except:
+				raise
+			finally:
+				if local and hasattr(local, 'primary_db'):
+					local.db.close()
+					local.db = local.primary_db
+
+			return retval
+		return wrapper_fn
+	return innfn
+
+def only_for(roles, message=False):
 	"""Raise `frappe.PermissionError` if the user does not have any of the given **Roles**.
 
 	:param roles: List of roles to check."""
@@ -459,23 +589,39 @@ def only_for(roles):
 	roles = set(roles)
 	myroles = set(get_roles())
 	if not roles.intersection(myroles):
+		if message:
+			msgprint(_('This action is only allowed for {}').format(bold(', '.join(roles))), _('Not Permitted'))
 		raise PermissionError
+
+def get_domain_data(module):
+	try:
+		domain_data = get_hooks('domains')
+		if module in domain_data:
+			return _dict(get_attr(get_hooks('domains')[module][0] + '.data'))
+		else:
+			return _dict()
+	except ImportError:
+		if local.flags.in_test:
+			return _dict()
+		else:
+			raise
+
 
 def clear_cache(user=None, doctype=None):
 	"""Clear **User**, **DocType** or global cache.
 
 	:param user: If user is given, only user cache is cleared.
 	:param doctype: If doctype is given, only DocType cache is cleared."""
-	import frappe.sessions
+	import frappe.cache_manager
 	if doctype:
-		import frappe.model.meta
-		frappe.model.meta.clear_cache(doctype)
+		frappe.cache_manager.clear_doctype_cache(doctype)
 		reset_metadata_version()
 	elif user:
-		frappe.sessions.clear_cache(user)
+		frappe.cache_manager.clear_user_cache(user)
 	else: # everything
-		import translate
-		frappe.sessions.clear_cache()
+		from frappe import translate
+		frappe.cache_manager.clear_user_cache()
+		frappe.cache_manager.clear_domain_cache()
 		translate.clear_cache()
 		reset_metadata_version()
 		local.cache = {}
@@ -497,7 +643,7 @@ def has_permission(doctype=None, ptype="read", doc=None, user=None, verbose=Fals
 		doctype = doc.doctype
 
 	import frappe.permissions
-	out = frappe.permissions.has_permission(doctype, ptype, doc=doc, verbose=verbose, user=user)
+	out = frappe.permissions.has_permission(doctype, ptype, doc=doc, verbose=verbose, user=user, raise_exception=throw)
 	if throw and not out:
 		if doc:
 			frappe.throw(_("No permission for {0}").format(doc.doctype + " " + doc.name))
@@ -518,7 +664,7 @@ def has_website_permission(doc=None, ptype='read', user=None, verbose=False, doc
 		user = session.user
 
 	if doc:
-		if isinstance(doc, basestring):
+		if isinstance(doc, string_types):
 			doc = get_doc(doctype, doc)
 
 		doctype = doc.doctype
@@ -528,7 +674,7 @@ def has_website_permission(doc=None, ptype='read', user=None, verbose=False, doc
 
 		# check permission in controller
 		if hasattr(doc, 'has_website_permission'):
-			return doc.has_website_permission(ptype, verbose=verbose)
+			return doc.has_website_permission(ptype, user, verbose=verbose)
 
 	hooks = (get_hooks("has_website_permission") or {}).get(doctype, [])
 	if hooks:
@@ -561,7 +707,7 @@ def generate_hash(txt=None, length=None):
 	"""Generates random hash for given text + current timestamp + random string."""
 	import hashlib, time
 	from .utils import random_string
-	digest = hashlib.sha224((txt or "") + repr(time.time()) + repr(random_string(8))).hexdigest()
+	digest = hashlib.sha224(((txt or "") + repr(time.time()) + repr(random_string(8))).encode()).hexdigest()
 	if length:
 		digest = digest[:length]
 	return digest
@@ -586,7 +732,49 @@ def set_value(doctype, docname, fieldname, value=None):
 	import frappe.client
 	return frappe.client.set_value(doctype, docname, fieldname, value)
 
-def get_doc(arg1, arg2=None):
+def get_cached_doc(*args, **kwargs):
+	if args and len(args) > 1 and isinstance(args[1], text_type):
+		key = get_document_cache_key(args[0], args[1])
+		# local cache
+		doc = local.document_cache.get(key)
+		if doc:
+			return doc
+
+		# redis cache
+		doc = cache().hget('document_cache', key)
+		if doc:
+			doc = get_doc(doc)
+			local.document_cache[key] = doc
+			return doc
+
+	# database
+	doc = get_doc(*args, **kwargs)
+
+	return doc
+
+def get_document_cache_key(doctype, name):
+	return '{0}::{1}'.format(doctype, name)
+
+def clear_document_cache(doctype, name):
+	cache().hdel("last_modified", doctype)
+	key = get_document_cache_key(doctype, name)
+	if key in local.document_cache:
+		del local.document_cache[key]
+	cache().hdel('document_cache', key)
+
+def get_cached_value(doctype, name, fieldname, as_dict=False):
+	doc = get_cached_doc(doctype, name)
+	if isinstance(fieldname, string_types):
+		if as_dict:
+			throw('Cannot make dict for single fieldname')
+		return doc.get(fieldname)
+
+	values = [doc.get(f) for f in fieldname]
+	if as_dict:
+		return _dict(zip(fieldname, values))
+	return values
+
+def get_doc(*args, **kwargs):
 	"""Return a `frappe.model.document.Document` object of the given type and name.
 
 	:param arg1: DocType name as string **or** document JSON.
@@ -596,14 +784,22 @@ def get_doc(arg1, arg2=None):
 
 		# insert a new document
 		todo = frappe.get_doc({"doctype":"ToDo", "description": "test"})
-		tood.insert()
+		todo.insert()
 
 		# open an existing document
 		todo = frappe.get_doc("ToDo", "TD0001")
 
 	"""
 	import frappe.model.document
-	return frappe.model.document.get_doc(arg1, arg2)
+	doc = frappe.model.document.get_doc(*args, **kwargs)
+
+	# set in cache
+	if args and len(args) > 1:
+		key = get_document_cache_key(args[0], args[1])
+		local.document_cache[key] = doc
+		cache().hset('document_cache', key, doc.as_dict())
+
+	return doc
 
 def get_last_doc(doctype):
 	"""Get last created document of this type."""
@@ -626,8 +822,8 @@ def get_meta_module(doctype):
 	import frappe.modules
 	return frappe.modules.load_doctype_module(doctype)
 
-def delete_doc(doctype=None, name=None, force=0, ignore_doctypes=None, for_reload=False,
-	ignore_permissions=False, flags=None):
+def delete_doc(doctype=None, name=None, force=0, ignore_doctypes=None,
+	for_reload=False, ignore_permissions=False, flags=None, ignore_on_trash=False, ignore_missing=True):
 	"""Delete a document. Calls `frappe.model.delete_doc.delete_doc`.
 
 	:param doctype: DocType of document to be delete.
@@ -638,7 +834,7 @@ def delete_doc(doctype=None, name=None, force=0, ignore_doctypes=None, for_reloa
 	:param ignore_permissions: Ignore user permissions."""
 	import frappe.model.delete_doc
 	frappe.model.delete_doc.delete_doc(doctype, name, force, ignore_doctypes, for_reload,
-		ignore_permissions, flags)
+		ignore_permissions, flags, ignore_on_trash, ignore_missing)
 
 def delete_doc_if_exists(doctype, name, force=0):
 	"""Delete document if exists."""
@@ -662,8 +858,16 @@ def reload_doc(module, dt=None, dn=None, force=False, reset_permissions=False):
 	import frappe.modules
 	return frappe.modules.reload_doc(module, dt, dn, force=force, reset_permissions=reset_permissions)
 
+@whitelist()
 def rename_doc(*args, **kwargs):
-	"""Rename a document. Calls `frappe.model.rename_doc.rename_doc`"""
+	"""
+		Renames a doc(dt, old) to doc(dt, new) and updates all linked fields of type "Link"
+
+		Calls `frappe.model.rename_doc.rename_doc`
+	"""
+	kwargs.pop('ignore_permissions', None)
+	kwargs.pop('cmd', None)
+
 	from frappe.model.rename_doc import rename_doc
 	return rename_doc(*args, **kwargs)
 
@@ -673,11 +877,11 @@ def get_module(modulename):
 
 def scrub(txt):
 	"""Returns sluggified string. e.g. `Sales Order` becomes `sales_order`."""
-	return txt.replace(' ','_').replace('-', '_').lower()
+	return txt.replace(' ', '_').replace('-', '_').lower()
 
 def unscrub(txt):
 	"""Returns titlified string. e.g. `sales_order` becomes `Sales Order`."""
-	return txt.replace('_',' ').replace('-', ' ').title()
+	return txt.replace('_', ' ').replace('-', ' ').title()
 
 def get_module_path(module, *joins):
 	"""Get the path of the given module name.
@@ -739,10 +943,13 @@ def get_installed_apps(sort=False, frappe_last=False):
 	if not db:
 		connect()
 
+	if not local.all_apps:
+		local.all_apps  = get_all_apps(True)
+
 	installed = json.loads(db.get_global("installed_apps") or "[]")
 
 	if sort:
-		installed = [app for app in get_all_apps(True) if app in installed]
+		installed = [app for app in local.all_apps if app in installed]
 
 	if frappe_last:
 		if 'frappe' in installed:
@@ -756,7 +963,7 @@ def get_doc_hooks():
 	if not hasattr(local, 'doc_events_hooks'):
 		hooks = get_hooks('doc_events', {})
 		out = {}
-		for key, value in hooks.iteritems():
+		for key, value in iteritems(hooks):
 			if isinstance(key, tuple):
 				for doctype in key:
 					append_hook(out, doctype, value)
@@ -793,11 +1000,15 @@ def get_hooks(hook=None, default=None, app_name=None):
 					append_hook(hooks, key, getattr(app_hooks, key))
 		return hooks
 
+	no_cache = conf.developer_mode or False
 
 	if app_name:
 		hooks = _dict(load_app_hooks(app_name))
 	else:
-		hooks = _dict(cache().get_value("app_hooks", load_app_hooks))
+		if no_cache:
+			hooks = _dict(load_app_hooks())
+		else:
+			hooks = _dict(cache().get_value("app_hooks", load_app_hooks))
 
 	if hook:
 		return hooks.get(hook) or (default if default is not None else [])
@@ -835,7 +1046,8 @@ def setup_module_map():
 	if not (local.app_modules and local.module_app):
 		local.module_app, local.app_modules = {}, {}
 		for app in get_all_apps(True):
-			if app=="webnotes": app="frappe"
+			if app == "webnotes":
+				app = "frappe"
 			local.app_modules.setdefault(app, [])
 			for module in get_module_list(app):
 				module = scrub(module)
@@ -854,7 +1066,10 @@ def get_file_items(path, raise_not_found=False, ignore_empty_lines=True):
 	if content:
 		content = frappe.utils.strip(content)
 
-		return [p.strip() for p in content.splitlines() if (not ignore_empty_lines) or (p.strip() and not p.startswith("#"))]
+		return [
+			p.strip() for p in content.splitlines()
+			if (not ignore_empty_lines) or (p.strip() and not p.startswith("#"))
+		]
 	else:
 		return []
 
@@ -865,7 +1080,7 @@ def get_file_json(path):
 
 def read_file(path, raise_not_found=False):
 	"""Open a file and return its content as Unicode."""
-	if isinstance(path, unicode):
+	if isinstance(path, text_type):
 		path = path.encode("utf-8")
 
 	if os.path.exists(path):
@@ -888,23 +1103,34 @@ def get_attr(method_string):
 
 def call(fn, *args, **kwargs):
 	"""Call a function and match arguments."""
-	if isinstance(fn, basestring):
+	if isinstance(fn, string_types):
 		fn = get_attr(fn)
 
+	newargs = get_newargs(fn, kwargs)
+
+	return fn(*args, **newargs)
+
+def get_newargs(fn, kwargs):
 	if hasattr(fn, 'fnargs'):
 		fnargs = fn.fnargs
 	else:
-		fnargs, varargs, varkw, defaults = inspect.getargspec(fn)
+		try:
+			fnargs, varargs, varkw, defaults = inspect.getargspec(fn)
+		except ValueError:
+			fnargs = inspect.getfullargspec(fn).args
+			varargs = inspect.getfullargspec(fn).varargs
+			varkw = inspect.getfullargspec(fn).varkw
+			defaults = inspect.getfullargspec(fn).defaults
 
 	newargs = {}
 	for a in kwargs:
 		if (a in fnargs) or varkw:
 			newargs[a] = kwargs.get(a)
 
-	if "flags" in newargs:
-		del newargs["flags"]
+	newargs.pop("ignore_permissions", None)
+	newargs.pop("flags", None)
 
-	return fn(*args, **newargs)
+	return newargs
 
 def make_property_setter(args, ignore_validate=False, validate_fields_for_doctype=True):
 	"""Create a new **Property Setter** (for overriding DocType and DocField properties).
@@ -940,12 +1166,13 @@ def make_property_setter(args, ignore_validate=False, validate_fields_for_doctyp
 		})
 		ps.flags.ignore_validate = ignore_validate
 		ps.flags.validate_fields_for_doctype = validate_fields_for_doctype
+		ps.validate_fieldtype_change()
 		ps.insert()
 
 def import_doc(path, ignore_links=False, ignore_insert=False, insert=False):
-	"""Import a file using Data Import Tool."""
-	from frappe.core.page.data_import_tool import data_import_tool
-	data_import_tool.import_doc(path, ignore_links=ignore_links, ignore_insert=ignore_insert, insert=insert)
+	"""Import a file using Data Import."""
+	from frappe.core.doctype.data_import.data_import import import_doc
+	import_doc(path, ignore_links=ignore_links, ignore_insert=ignore_insert, insert=insert)
 
 def copy_doc(doc, ignore_no_copy=True):
 	""" No_copy fields also get copied."""
@@ -1004,8 +1231,9 @@ def compare(val1, condition, val2):
 	import frappe.utils
 	return frappe.utils.compare(val1, condition, val2)
 
-def respond_as_web_page(title, html, success=None, http_status_code=None,
-	context=None, indicator_color=None, primary_action='/', primary_label = None, fullpage=False):
+def respond_as_web_page(title, html, success=None, http_status_code=None, context=None,
+	indicator_color=None, primary_action='/', primary_label = None, fullpage=False,
+	width=None, template='message'):
 	"""Send response as a web page with a message rather than JSON. Used to show permission errors etc.
 
 	:param title: Page title and heading.
@@ -1015,12 +1243,17 @@ def respond_as_web_page(title, html, success=None, http_status_code=None,
 	:param context: web template context
 	:param indicator_color: color of indicator in title
 	:param primary_action: route on primary button (default is `/`)
-	:param primary_label: label on primary button (defaut is "Home")
-	:param fullpage: hide header / footer"""
+	:param primary_label: label on primary button (default is "Home")
+	:param fullpage: hide header / footer
+	:param width: Width of message in pixels
+	:param template: Optionally pass view template
+	"""
 	local.message_title = title
 	local.message = html
 	local.response['type'] = 'page'
-	local.response['route'] = 'message'
+	local.response['route'] = template
+	local.no_cache = 1
+
 	if http_status_code:
 		local.response['http_status_code'] = http_status_code
 
@@ -1040,6 +1273,8 @@ def respond_as_web_page(title, html, success=None, http_status_code=None,
 	context['primary_action'] = primary_action
 	context['error_code'] = http_status_code
 	context['fullpage'] = fullpage
+	if width:
+		context['card_width'] = width
 
 	local.response['context'] = context
 
@@ -1085,7 +1320,7 @@ def redirect_to_message(title, html, http_status_code=None, context=None, indica
 def build_match_conditions(doctype, as_condition=True):
 	"""Return match (User permissions) for given doctype as list or SQL."""
 	import frappe.desk.reportview
-	return frappe.desk.reportview.build_match_conditions(doctype, as_condition)
+	return frappe.desk.reportview.build_match_conditions(doctype, as_condition=as_condition)
 
 def get_list(doctype, *args, **kwargs):
 	"""List database query via `frappe.model.db_query`. Will also check for permissions.
@@ -1095,7 +1330,7 @@ def get_list(doctype, *args, **kwargs):
 	:param filters: List of filters (see example).
 	:param order_by: Order By e.g. `modified desc`.
 	:param limit_page_start: Start results at record #. Default 0.
-	:param limit_poge_length: No of records in the page. Default 20.
+	:param limit_page_length: No of records in the page. Default 20.
 
 	Example usage:
 
@@ -1112,15 +1347,15 @@ def get_list(doctype, *args, **kwargs):
 	return frappe.model.db_query.DatabaseQuery(doctype).execute(None, *args, **kwargs)
 
 def get_all(doctype, *args, **kwargs):
-	"""List database query via `frappe.model.db_query`. Will **not** check for conditions.
+	"""List database query via `frappe.model.db_query`. Will **not** check for permissions.
 	Parameters are same as `frappe.get_list`
 
 	:param doctype: DocType on which query is to be made.
 	:param fields: List of fields or `*`. Default is: `["name"]`.
 	:param filters: List of filters (see example).
 	:param order_by: Order By e.g. `modified desc`.
-	:param limit_page_start: Start results at record #. Default 0.
-	:param limit_poge_length: No of records in the page. Default 20.
+	:param limit_start: Start results at record #. Default 0.
+	:param limit_page_length: No of records in the page. Default 20.
 
 	Example usage:
 
@@ -1154,10 +1389,10 @@ def get_value(*args, **kwargs):
 
 def as_json(obj, indent=1):
 	from frappe.utils.response import json_handler
-	return json.dumps(obj, indent=indent, sort_keys=True, default=json_handler)
+	return json.dumps(obj, indent=indent, sort_keys=True, default=json_handler, separators=(',', ': '))
 
 def are_emails_muted():
-	from utils import cint
+	from frappe.utils import cint
 	return flags.mute_emails or cint(conf.get("mute_emails") or 0) or False
 
 def get_test_records(doctype):
@@ -1186,14 +1421,16 @@ def format(*args, **kwargs):
 	import frappe.utils.formatters
 	return frappe.utils.formatters.format_value(*args, **kwargs)
 
-def get_print(doctype=None, name=None, print_format=None, style=None, html=None, as_pdf=False, doc=None, output = None):
+def get_print(doctype=None, name=None, print_format=None, style=None,
+	html=None, as_pdf=False, doc=None, output=None, no_letterhead=0, password=None):
 	"""Get Print Format for given document.
 
 	:param doctype: DocType of document.
 	:param name: Name of document.
 	:param print_format: Print Format name. Default 'Standard',
 	:param style: Print Format style.
-	:param as_pdf: Return as PDF. Default False."""
+	:param as_pdf: Return as PDF. Default False.
+	:param password: Password to encrypt the pdf with. Default None"""
 	from frappe.website.render import build_page
 	from frappe.utils.pdf import get_pdf
 
@@ -1202,16 +1439,22 @@ def get_print(doctype=None, name=None, print_format=None, style=None, html=None,
 	local.form_dict.format = print_format
 	local.form_dict.style = style
 	local.form_dict.doc = doc
+	local.form_dict.no_letterhead = no_letterhead
+
+	options = None
+	if password:
+		options = {'password': password}
 
 	if not html:
 		html = build_page("printview")
 
 	if as_pdf:
-		return get_pdf(html, output = output)
+		return get_pdf(html, output = output, options = options)
 	else:
 		return html
 
-def attach_print(doctype, name, file_name=None, print_format=None, style=None, html=None, doc=None):
+def attach_print(doctype, name, file_name=None, print_format=None,
+	style=None, html=None, doc=None, lang=None, print_letterhead=True, password=None):
 	from frappe.utils import scrub_urls
 
 	if not file_name: file_name = name
@@ -1219,20 +1462,40 @@ def attach_print(doctype, name, file_name=None, print_format=None, style=None, h
 
 	print_settings = db.get_singles_dict("Print Settings")
 
+	_lang = local.lang
+
+	#set lang as specified in print format attachment
+	if lang: local.lang = lang
 	local.flags.ignore_print_permissions = True
 
+	no_letterhead = not print_letterhead
+
+	kwargs = dict(
+		print_format=print_format,
+		style=style,
+		html=html,
+		doc=doc,
+		no_letterhead=no_letterhead,
+		password=password
+	)
+
+	content = ''
 	if int(print_settings.send_print_as_pdf or 0):
-		out = {
-			"fname": file_name + ".pdf",
-			"fcontent": get_print(doctype, name, print_format=print_format, style=style, html=html, as_pdf=True, doc=doc)
-		}
+		ext = ".pdf"
+		kwargs["as_pdf"] = True
+		content = get_print(doctype, name, **kwargs)
 	else:
-		out = {
-			"fname": file_name + ".html",
-			"fcontent": scrub_urls(get_print(doctype, name, print_format=print_format, style=style, html=html, doc=doc)).encode("utf-8")
-		}
+		ext = ".html"
+		content = scrub_urls(get_print(doctype, name, **kwargs)).encode('utf-8')
+
+	out = {
+		"fname": file_name + ext,
+		"fcontent": content
+	}
 
 	local.flags.ignore_print_permissions = False
+	#reset lang to original local lang
+	local.lang = _lang
 
 	return out
 
@@ -1241,11 +1504,12 @@ def publish_progress(*args, **kwargs):
 
 	:param percent: Percent progress
 	:param title: Title
-	:param doctype: Optional, for DocType
-	:param name: Optional, for Document name
+	:param doctype: Optional, for document type
+	:param docname: Optional, for document name
+	:param description: Optional description
 	"""
-	import frappe.async
-	return frappe.async.publish_progress(*args, **kwargs)
+	import frappe.realtime
+	return frappe.realtime.publish_progress(*args, **kwargs)
 
 def publish_realtime(*args, **kwargs):
 	"""Publish real-time updates
@@ -1258,9 +1522,9 @@ def publish_realtime(*args, **kwargs):
 	:param docname: Transmit to doctype, docname
 	:param after_commit: (default False) will emit after current transaction is committed
 	"""
-	import frappe.async
+	import frappe.realtime
 
-	return frappe.async.publish_realtime(*args, **kwargs)
+	return frappe.realtime.publish_realtime(*args, **kwargs)
 
 def local_cache(namespace, key, generator, regenerate_if_none=False):
 	"""A key value store for caching within a request
@@ -1290,12 +1554,26 @@ def enqueue(*args, **kwargs):
 		:param queue: (optional) should be either long, default or short
 		:param timeout: (optional) should be set according to the functions
 		:param event: this is passed to enable clearing of jobs from queues
-		:param async: (optional) if async=False, the method is executed immediately, else via a worker
+		:param is_async: (optional) if is_async=False, the method is executed immediately, else via a worker
 		:param job_name: (optional) can be used to name an enqueue call, which can be used to prevent duplicate calls
 		:param kwargs: keyword arguments to be passed to the method
 	'''
 	import frappe.utils.background_jobs
 	return frappe.utils.background_jobs.enqueue(*args, **kwargs)
+
+def enqueue_doc(*args, **kwargs):
+	'''
+		Enqueue method to be executed using a background worker
+
+		:param doctype: DocType of the document on which you want to run the event
+		:param name: Name of the document on which you want to run the event
+		:param method: method string or method object
+		:param queue: (optional) should be either long, default or short
+		:param timeout: (optional) should be set according to the functions
+		:param kwargs: keyword arguments to be passed to the method
+	'''
+	import frappe.utils.background_jobs
+	return frappe.utils.background_jobs.enqueue_doc(*args, **kwargs)
 
 def get_doctype_app(doctype):
 	def _get_doctype_app():
@@ -1306,18 +1584,37 @@ def get_doctype_app(doctype):
 
 loggers = {}
 log_level = None
-def logger(module=None, with_more_info=True):
+def logger(module=None, with_more_info=False, allow_site=True, filter=None, max_size=100_000, file_count=20):
 	'''Returns a python logger that uses StreamHandler'''
 	from frappe.utils.logger import get_logger
-	return get_logger(module or 'default', with_more_info=with_more_info)
+	return get_logger(module=module, with_more_info=with_more_info, allow_site=allow_site, filter=filter, max_size=max_size, file_count=file_count)
 
-def log_error(message=None, title=None):
+def log_error(message=None, title=_("Error")):
 	'''Log error to Error Log'''
-	get_doc(dict(doctype='Error Log', error=str(message or get_traceback()),
+
+	# AI ALERT:
+	# the title and message may be swapped
+	# the better API for this is log_error(title, message), and used in many cases this way
+	# this hack tries to be smart about whats a title (single line ;-)) and fixes it
+
+	if message:
+		if '\n' in title:
+			error, title = title, message
+		else:
+			error = message
+	else:
+		error = get_traceback()
+
+	return get_doc(dict(doctype='Error Log', error=as_unicode(error),
 		method=title)).insert(ignore_permissions=True)
 
 def get_desk_link(doctype, name):
-	return '<a href="#Form/{0}/{1}" style="font-weight: bold;">{2} {1}</a>'.format(doctype, name, _(doctype))
+	html = '<a href="#Form/{doctype}/{name}" style="font-weight: bold;">{doctype_local} {name}</a>'
+	return html.format(
+		doctype=doctype,
+		name=name,
+		doctype_local=_(doctype)
+	)
 
 def bold(text):
 	return '<b>{0}</b>'.format(text)
@@ -1327,7 +1624,7 @@ def safe_eval(code, eval_globals=None, eval_locals=None):
 	whitelisted_globals = {
 		"int": int,
 		"float": float,
-		"long": long,
+		"long": int,
 		"round": round
 	}
 
@@ -1336,22 +1633,106 @@ def safe_eval(code, eval_globals=None, eval_locals=None):
 
 	if not eval_globals:
 		eval_globals = {}
+
 	eval_globals['__builtins__'] = {}
-
 	eval_globals.update(whitelisted_globals)
-
 	return eval(code, eval_globals, eval_locals)
 
+def get_system_settings(key):
+	if key not in local.system_settings:
+		local.system_settings.update({key: db.get_single_value('System Settings', key)})
+	return local.system_settings.get(key)
+
 def get_active_domains():
-	""" get the domains set in the Domain Settings as active domain """
+	from frappe.core.doctype.domain_settings.domain_settings import get_active_domains
+	return get_active_domains()
 
-	active_domains = cache().hget("domains", "active_domains") or None
-	if active_domains is None:
-		domains = get_all("Has Domain", filters={ "parent": "Domain Settings" },
-			fields=["domain"], distinct=True)
+def get_version(doctype, name, limit=None, head=False, raise_err=True):
+	'''
+	Returns a list of version information of a given DocType.
 
-		active_domains = [row.get("domain") for row in domains]
-		active_domains.append("")
-		cache().hset("domains", "active_domains", active_domains)
+	Note: Applicable only if DocType has changes tracked.
 
-	return active_domains
+	Example
+	>>> frappe.get_version('User', 'foobar@gmail.com')
+	>>>
+	[
+		{
+			"version": [version.data],			# Refer Version DocType get_diff method and data attribute
+			"user": "admin@gmail.com",			# User that created this version
+			"creation": <datetime.datetime>		# Creation timestamp of that object.
+		}
+	]
+	'''
+	meta = get_meta(doctype)
+	if meta.track_changes:
+		names = db.get_all('Version', filters={
+			'ref_doctype': doctype,
+			'docname': name,
+			'order_by': 'creation' if head else None,
+			'limit': limit
+		}, as_list=1)
+
+		from frappe.chat.util import squashify, dictify, safe_json_loads
+
+		versions = []
+
+		for name in names:
+			name = squashify(name)
+			doc = get_doc('Version', name)
+
+			data = doc.data
+			data = safe_json_loads(data)
+			data = dictify(dict(
+				version=data,
+				user=doc.owner,
+				creation=doc.creation
+			))
+
+			versions.append(data)
+
+		return versions
+	else:
+		if raise_err:
+			raise ValueError(_('{0} has no versions tracked.').format(doctype))
+
+@whitelist(allow_guest=True)
+def ping():
+	return "pong"
+
+
+def safe_encode(param, encoding='utf-8'):
+	try:
+		param = param.encode(encoding)
+	except Exception:
+		pass
+	return param
+
+
+def safe_decode(param, encoding='utf-8'):
+	try:
+		param = param.decode(encoding)
+	except Exception:
+		pass
+	return param
+
+def parse_json(val):
+	from frappe.utils import parse_json
+	return parse_json(val)
+
+def mock(type, size=1, locale='en'):
+	results = []
+	faker = Faker(locale)
+	if not type in dir(faker):
+		raise ValueError('Not a valid mock type.')
+	else:
+		for i in range(size):
+			data = getattr(faker, type)()
+			results.append(data)
+
+	from frappe.chat.util import squashify
+	return squashify(results)
+
+def validate_and_sanitize_search_inputs(fn):
+	from frappe.desk.search import validate_and_sanitize_search_inputs as func
+	return func(fn)

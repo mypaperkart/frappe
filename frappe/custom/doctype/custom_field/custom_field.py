@@ -7,6 +7,8 @@ import json
 from frappe.utils import cstr
 from frappe import _
 from frappe.model.document import Document
+from frappe.model.docfield import supports_translation
+from frappe.model import core_doctypes_list
 
 class CustomField(Document):
 	def autoname(self):
@@ -15,29 +17,48 @@ class CustomField(Document):
 
 	def set_fieldname(self):
 		if not self.fieldname:
-			if not self.label:
-				frappe.throw(_("Label is mandatory"))
+			label = self.label
+			if not label:
+				if self.fieldtype in ["Section Break", "Column Break"]:
+					label = self.fieldtype + "_" + str(self.idx)
+				else:
+					frappe.throw(_("Label is mandatory"))
+
 			# remove special characters from fieldname
-			self.fieldname = filter(lambda x: x.isdigit() or x.isalpha() or '_',
-				cstr(self.label).lower().replace(' ','_'))
+			self.fieldname = "".join(filter(lambda x: x.isdigit() or x.isalpha() or '_',
+				cstr(label).replace(' ','_')))
 
 		# fieldnames should be lowercase
 		self.fieldname = self.fieldname.lower()
 
-	def validate(self):
-		meta = frappe.get_meta(self.dt)
+	def before_insert(self):
+		meta = frappe.get_meta(self.dt, cached=False)
 		fieldnames = [df.fieldname for df in meta.get("fields")]
+
+		if self.fieldname in fieldnames:
+			frappe.throw(_("A field with the name '{}' already exists in doctype {}.").format(self.fieldname, self.dt))
+
+	def validate(self):
+		meta = frappe.get_meta(self.dt, cached=False)
+		fieldnames = [df.fieldname for df in meta.get("fields")]
+
+		if self.insert_after=='append':
+			self.insert_after = fieldnames[-1]
 
 		if self.insert_after and self.insert_after in fieldnames:
 			self.idx = fieldnames.index(self.insert_after) + 1
-
-		if not self.idx:
-			self.idx = len(fieldnames) + 1
 
 		self._old_fieldtype = self.db_get('fieldtype')
 
 		if not self.fieldname:
 			frappe.throw(_("Fieldname not set for Custom Field"))
+
+		if self.get('translatable', 0) and not supports_translation(self.fieldtype):
+			self.translatable = 0
+
+		if not self.flags.ignore_validate:
+			from frappe.core.doctype.doctype.doctype import check_if_fieldname_conflicts_with_methods
+			check_if_fieldname_conflicts_with_methods(self.dt, self.fieldname)
 
 	def on_update(self):
 		frappe.clear_cache(doctype=self.dt)
@@ -48,12 +69,14 @@ class CustomField(Document):
 
 		# update the schema
 		if not frappe.db.get_value('DocType', self.dt, 'issingle'):
-			if (self.fieldname not in frappe.db.get_table_columns(self.dt)
-				or getattr(self, "_old_fieldtype", None) != self.fieldtype):
-				from frappe.model.db_schema import updatedb
-				updatedb(self.dt)
+			frappe.db.updatedb(self.dt)
 
 	def on_trash(self):
+		#check if Admin owned field
+		if self.owner == 'Administrator' and frappe.session.user != 'Administrator':
+			frappe.throw(_("Custom Field {0} is created by the Administrator and can only be deleted through the Administrator account.").format(
+					frappe.bold(self.label)))
+
 		# delete property setter entries
 		frappe.db.sql("""\
 			DELETE FROM `tabProperty Setter`
@@ -73,7 +96,16 @@ class CustomField(Document):
 
 @frappe.whitelist()
 def get_fields_label(doctype=None):
-	return [{"value": df.fieldname or "", "label": _(df.label or "")} for df in frappe.get_meta(doctype).get("fields")]
+	meta = frappe.get_meta(doctype)
+
+	if doctype in core_doctypes_list:
+		return frappe.msgprint(_("Custom Fields cannot be added to core DocTypes."))
+
+	if meta.custom:
+		return frappe.msgprint(_("Custom Fields can only be added to a standard DocType."))
+
+	return [{"value": df.fieldname or "", "label": _(df.label or "")}
+		for df in frappe.get_meta(doctype).get("fields")]
 
 def create_custom_field_if_values_exist(doctype, df):
 	df = frappe._dict(df)
@@ -83,22 +115,47 @@ def create_custom_field_if_values_exist(doctype, df):
 
 		create_custom_field(doctype, df)
 
-
-def create_custom_field(doctype, df):
+def create_custom_field(doctype, df, ignore_validate=False):
 	df = frappe._dict(df)
+	if not df.fieldname and df.label:
+		df.fieldname = frappe.scrub(df.label)
 	if not frappe.db.get_value("Custom Field", {"dt": doctype, "fieldname": df.fieldname}):
-		frappe.get_doc({
+		custom_field = frappe.get_doc({
 			"doctype":"Custom Field",
 			"dt": doctype,
-			"permlevel": df.permlevel or 0,
-			"label": df.label,
-			"fieldname": df.fieldname or df.label.lower().replace(' ', '_'),
-			"fieldtype": df.fieldtype,
-			"options": df.options,
-			"insert_after": df.insert_after,
-			"print_hide": df.print_hide,
-			"hidden": df.hidden or 0
-		}).insert()
+			"permlevel": 0,
+			"fieldtype": 'Data',
+			"hidden": 0,
+			# Looks like we always  use this programatically?
+			# "is_standard": 1
+		})
+		custom_field.update(df)
+		custom_field.flags.ignore_validate = ignore_validate
+		custom_field.insert()
+
+def create_custom_fields(custom_fields, ignore_validate = False, update=True):
+	'''Add / update multiple custom fields
+
+	:param custom_fields: example `{'Sales Invoice': [dict(fieldname='test')]}`'''
+	for doctype, fields in custom_fields.items():
+		if isinstance(fields, dict):
+			# only one field
+			fields = [fields]
+
+		for df in fields:
+			field = frappe.db.get_value("Custom Field", {"dt": doctype, "fieldname": df["fieldname"]})
+			if not field:
+				try:
+					df["owner"] = "Administrator"
+					create_custom_field(doctype, df, ignore_validate=ignore_validate)
+				except frappe.exceptions.DuplicateEntryError:
+					pass
+			elif update:
+				custom_field = frappe.get_doc("Custom Field", field)
+				custom_field.flags.ignore_validate = ignore_validate
+				custom_field.update(df)
+				custom_field.save()
+
 
 @frappe.whitelist()
 def add_custom_field(doctype, df):

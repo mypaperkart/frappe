@@ -3,8 +3,10 @@
 
 from __future__ import unicode_literals, print_function
 
-import frappe, os, re
-from frappe.utils import touch_file, encode, cstr
+from six.moves import input
+
+import frappe, os, re, git
+from frappe.utils import touch_file, cstr
 
 def make_boilerplate(dest, app_name):
 	if not os.path.exists(dest):
@@ -25,7 +27,7 @@ def make_boilerplate(dest, app_name):
 		hook_key = key.split(" (")[0].lower().replace(" ", "_")
 		hook_val = None
 		while not hook_val:
-			hook_val = cstr(raw_input(key + ": "))
+			hook_val = cstr(input(key + ": "))
 
 			if not hook_val:
 				defaults = {
@@ -39,7 +41,7 @@ def make_boilerplate(dest, app_name):
 
 			if hook_key=="app_name" and hook_val.lower().replace(" ", "_") != hook_val:
 				print("App Name must be all lowercase and without spaces")
-  				hook_val = ""
+				hook_val = ""
 			elif hook_key=="app_title" and not re.match("^(?![\W])[^\d_\s][\w -]+$", hook_val, re.UNICODE):
 				print("App Title should start with a letter and it can only consist of letters, numbers, spaces and underscores")
 				hook_val = ""
@@ -61,42 +63,48 @@ def make_boilerplate(dest, app_name):
 		"js"))
 
 	with open(os.path.join(dest, hooks.app_name, hooks.app_name, "__init__.py"), "w") as f:
-		f.write(encode(init_template))
+		f.write(frappe.as_unicode(init_template))
 
 	with open(os.path.join(dest, hooks.app_name, "MANIFEST.in"), "w") as f:
-		f.write(encode(manifest_template.format(**hooks)))
+		f.write(frappe.as_unicode(manifest_template.format(**hooks)))
 
 	with open(os.path.join(dest, hooks.app_name, ".gitignore"), "w") as f:
-		f.write(encode(gitignore_template.format(app_name = hooks.app_name)))
+		f.write(frappe.as_unicode(gitignore_template.format(app_name = hooks.app_name)))
 
 	with open(os.path.join(dest, hooks.app_name, "setup.py"), "w") as f:
-		f.write(encode(setup_template.format(**hooks)))
+		f.write(frappe.as_unicode(setup_template.format(**hooks)))
 
 	with open(os.path.join(dest, hooks.app_name, "requirements.txt"), "w") as f:
 		f.write("frappe")
 
 	with open(os.path.join(dest, hooks.app_name, "README.md"), "w") as f:
-		f.write(encode("## {0}\n\n{1}\n\n#### License\n\n{2}".format(hooks.app_title,
+		f.write(frappe.as_unicode("## {0}\n\n{1}\n\n#### License\n\n{2}".format(hooks.app_title,
 			hooks.app_description, hooks.app_license)))
 
 	with open(os.path.join(dest, hooks.app_name, "license.txt"), "w") as f:
-		f.write(encode("License: " + hooks.app_license))
+		f.write(frappe.as_unicode("License: " + hooks.app_license))
 
 	with open(os.path.join(dest, hooks.app_name, hooks.app_name, "modules.txt"), "w") as f:
-		f.write(encode(hooks.app_title))
+		f.write(frappe.as_unicode(hooks.app_title))
 
 	with open(os.path.join(dest, hooks.app_name, hooks.app_name, "hooks.py"), "w") as f:
-		f.write(encode(hooks_template.format(**hooks)))
+		f.write(frappe.as_unicode(hooks_template.format(**hooks)))
 
 	touch_file(os.path.join(dest, hooks.app_name, hooks.app_name, "patches.txt"))
 
 	with open(os.path.join(dest, hooks.app_name, hooks.app_name, "config", "desktop.py"), "w") as f:
-		f.write(encode(desktop_template.format(**hooks)))
+		f.write(frappe.as_unicode(desktop_template.format(**hooks)))
 
 	with open(os.path.join(dest, hooks.app_name, hooks.app_name, "config", "docs.py"), "w") as f:
-		f.write(encode(docs_template.format(**hooks)))
+		f.write(frappe.as_unicode(docs_template.format(**hooks)))
 
-	print("'{app}' created at {path}".format(app=app_name, path=os.path.join(dest, app_name)))
+	# initialize git repository
+	app_directory = os.path.join(dest, hooks.app_name)
+	app_repo = git.Repo.init(app_directory)
+	app_repo.git.add(A=True)
+	app_repo.index.commit("feat: Initialize App")
+
+	print("'{app}' created at {path}".format(app=app_name, path=app_directory))
 
 
 manifest_template = """include MANIFEST.in
@@ -149,6 +157,13 @@ app_license = "{app_license}"
 # web_include_css = "/assets/{app_name}/css/{app_name}.css"
 # web_include_js = "/assets/{app_name}/js/{app_name}.js"
 
+# include custom scss in every website theme (without file extension ".scss")
+# website_theme_scss = "{app_name}/public/scss/website"
+
+# include js, css files in header of web form
+# webform_include_js = {{"doctype": "public/js/doctype.js"}}
+# webform_include_css = {{"doctype": "public/css/doctype.css"}}
+
 # include js in page
 # page_js = {{"page" : "public/js/file.js"}}
 
@@ -156,6 +171,7 @@ app_license = "{app_license}"
 # doctype_js = {{"doctype" : "public/js/doctype.js"}}
 # doctype_list_js = {{"doctype" : "public/js/doctype_list.js"}}
 # doctype_tree_js = {{"doctype" : "public/js/doctype_tree.js"}}
+# doctype_calendar_js = {{"doctype" : "public/js/doctype_calendar.js"}}
 
 # Home Pages
 # ----------
@@ -167,9 +183,6 @@ app_license = "{app_license}"
 # role_home_page = {{
 #	"Role": "home_page"
 # }}
-
-# Website user home page (by function)
-# get_website_user_home_page = "{app_name}.utils.get_home_page"
 
 # Generators
 # ----------
@@ -199,6 +212,14 @@ app_license = "{app_license}"
 #
 # has_permission = {{
 # 	"Event": "frappe.desk.doctype.event.event.has_permission",
+# }}
+
+# DocType Class
+# ---------------
+# Override standard doctype classes
+
+# override_doctype_class = {{
+# 	"ToDo": "custom_app.overrides.CustomToDo"
 # }}
 
 # Document Events
@@ -239,12 +260,23 @@ app_license = "{app_license}"
 
 # before_tests = "{app_name}.install.before_tests"
 
-# Overriding Whitelisted Methods
+# Overriding Methods
 # ------------------------------
 #
 # override_whitelisted_methods = {{
 # 	"frappe.desk.doctype.event.event.get_events": "{app_name}.event.get_events"
 # }}
+#
+# each overriding function accepts a `data` argument;
+# generated from the base implementation of the doctype dashboard,
+# along with any modifications made in other Frappe apps
+# override_doctype_dashboards = {{
+# 	"Task": "{app_name}.task.get_dashboard_data"
+# }}
+
+# exempt linked doctypes from being automatically cancelled
+#
+# auto_cancel_exempted_doctypes = ["Auto Repeat"]
 
 """
 
@@ -266,17 +298,12 @@ def get_data():
 
 setup_template = """# -*- coding: utf-8 -*-
 from setuptools import setup, find_packages
-from pip.req import parse_requirements
-import re, ast
+
+with open('requirements.txt') as f:
+	install_requires = f.read().strip().split('\\n')
 
 # get version from __version__ variable in {app_name}/__init__.py
-_version_re = re.compile(r'__version__\s+=\s+(.*)')
-
-with open('{app_name}/__init__.py', 'rb') as f:
-    version = str(ast.literal_eval(_version_re.search(
-        f.read().decode('utf-8')).group(1)))
-
-requirements = parse_requirements("requirements.txt", session="")
+from {app_name} import __version__ as version
 
 setup(
 	name='{app_name}',
@@ -287,8 +314,7 @@ setup(
 	packages=find_packages(),
 	zip_safe=False,
 	include_package_data=True,
-	install_requires=[str(ir.req) for ir in requirements],
-	dependency_links=[str(ir._link) for ir in requirements if ir._link]
+	install_requires=install_requires
 )
 """
 

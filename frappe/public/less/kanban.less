@@ -87,6 +87,15 @@
 
 	.kanban-card-wrapper {
 		position: relative;
+
+		.kanban-card-redirect {
+			display: block;
+
+			&:hover,
+			&:focus {
+				text-decoration: none;
+			}
+		}
 	}
 
 	.kanban-card:hover, .new-card-area, .edit-card-area {
@@ -152,6 +161,11 @@
 			width: 16px;
 			height: 16px;
 		}
+	}
+
+	.kanban-empty-state {
+		width: 100%;
+		line-height: 400px;
 	}
 }
 

@@ -10,6 +10,11 @@ frappe.dom = {
 	by_id: function(id) {
 		return document.getElementById(id);
 	},
+	get_unique_id: function() {
+		const id = 'unique-' + frappe.dom.id_count;
+		frappe.dom.id_count++;
+		return id;
+	},
 	set_unique_id: function(ele) {
 		var $ele = $(ele);
 		if($ele.attr('id')) {
@@ -28,12 +33,19 @@ frappe.dom = {
 		document.getElementsByTagName('head')[0].appendChild(el);
 	},
 	remove_script_and_style: function(txt) {
+		const evil_tags = ["script", "style", "noscript", "title", "meta", "base", "head"];
+		const regex = new RegExp(evil_tags.map(tag => `<${tag}>.*<\\/${tag}>`).join('|'), 's');
+		if (!regex.test(txt)) {
+			// no evil tags found, skip the DOM method entirely!
+			return txt;
+		}
+
 		var div = document.createElement('div');
 		div.innerHTML = txt;
 		var found = false;
-		["script", "style", "noscript", "title", "meta", "base", "head"].forEach(function(e, i) {
+		evil_tags.forEach(function(e) {
 			var elements = div.getElementsByTagName(e);
-			var i = elements.length;
+			i = elements.length;
 			while (i--) {
 				found = true;
 				elements[i].parentNode.removeChild(elements[i]);
@@ -56,7 +68,7 @@ frappe.dom = {
 			return txt;
 		}
 	},
-	is_element_in_viewport: function (el) {
+	is_element_in_viewport: function (el, tolerance=0) {
 
 		//special bonus for those using jQuery
 		if (typeof jQuery === "function" && el instanceof jQuery) {
@@ -66,11 +78,15 @@ frappe.dom = {
 		var rect = el.getBoundingClientRect();
 
 		return (
-			rect.top >= 0
-			&& rect.left >= 0
-			// && rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) && /*or $(window).height() */
-			// && rect.right <= (window.innerWidth || document.documentElement.clientWidth) /*or $(window).width() */
+			rect.top + tolerance >= 0
+			&& rect.left + tolerance >= 0
+			&& rect.bottom - tolerance <= $(window).height()
+			&& rect.right - tolerance <= $(window).width()
 		);
+	},
+
+	is_element_in_modal(element) {
+		return Boolean($(element).parents('.modal').length);
 	},
 
 	set_style: function(txt, id) {
@@ -93,6 +109,7 @@ frappe.dom = {
 			se.appendChild(document.createTextNode(txt));
 		}
 		document.getElementsByTagName('head')[0].appendChild(se);
+		return se;
 	},
 	add: function(parent, newtag, className, cs, innerHTML, onclick) {
 		if(parent && parent.substr)parent = frappe.dom.by_id(parent);
@@ -117,6 +134,11 @@ frappe.dom = {
 			$.extend(ele.style, s);
 		}
 		return ele;
+	},
+	activate: function($parent, $child, common_class, active_class='active') {
+		$parent.find(`.${common_class}.${active_class}`)
+			.removeClass(active_class);
+		$child.addClass(active_class);
 	},
 	freeze: function(msg, css_class) {
 		// blur
@@ -183,8 +205,49 @@ frappe.dom = {
 	},
 	is_touchscreen: function() {
 		return ('ontouchstart' in window)
+	},
+	handle_broken_images(container) {
+		$(container).find('img').on('error', (e) => {
+			const $img = $(e.currentTarget);
+			$img.addClass('no-image');
+		});
+	},
+	scroll_to_bottom(container) {
+		const $container = $(container);
+		$container.scrollTop($container[0].scrollHeight);
+	},
+	file_to_base64(file_obj) {
+		return new Promise(resolve => {
+			const reader = new FileReader();
+			reader.onload = function() {
+				resolve(reader.result);
+			};
+			reader.readAsDataURL(file_obj);
+		});
+	},
+	scroll_to_section(section_name) {
+		setTimeout(() => {
+			const section = $(`a:contains("${section_name}")`);
+			if (section.length) {
+				if(section.parent().hasClass('collapsed')) {
+					// opens the section
+					section.click();
+				}
+				frappe.ui.scroll(section.parent().parent());
+			}
+		}, 200);
+	},
+	pixel_to_inches(pixels) {
+		const div = $('<div id="dpi" style="height: 1in; width: 1in; left: 100%; position: fixed; top: 100%;"></div>');
+		div.appendTo(document.body);
+
+		const dpi_x = document.getElementById('dpi').offsetWidth;
+		const inches = pixels / dpi_x;
+		div.remove();
+
+		return inches;
 	}
-}
+};
 
 frappe.ellipsis = function(text, max) {
 	if(!max) max = 20;
@@ -195,95 +258,91 @@ frappe.ellipsis = function(text, max) {
 	return text;
 };
 
+frappe.run_serially = function(tasks) {
+	var result = Promise.resolve();
+	tasks.forEach(task => {
+		if(task) {
+			result = result.then ? result.then(task) : Promise.resolve();
+		}
+	});
+	return result;
+};
+
+frappe.load_image = (src, onload, onerror, preprocess = () => {}) => {
+	var tester = new Image();
+	tester.onload = function() {
+		onload(this);
+	};
+	tester.onerror = onerror;
+
+	preprocess(tester);
+	tester.src = src;
+}
+
+frappe.timeout = seconds => {
+	return new Promise((resolve) => {
+		setTimeout(() => resolve(), seconds * 1000);
+	});
+};
+
+frappe.scrub = function(text, spacer='_') {
+	return text.replace(/ /g, spacer).toLowerCase();
+};
+
 frappe.get_modal = function(title, content) {
-	return $(frappe.render_template("modal", {title:title, content:content})).appendTo(document.body);
+	return $(`<div class="modal fade" style="overflow: auto;" tabindex="-1">
+		<div class="modal-dialog">
+			<div class="modal-content">
+				<div class="modal-header">
+					<div class="flex justify-between">
+						<div class="fill-width flex">
+							<span class="indicator hidden"></span>
+							<h4 class="modal-title" style="font-weight: bold;">${title}</h4>
+						</div>
+						<div>
+							<div class="text-right buttons">
+								<button type="button" class="btn btn-default btn-sm btn-modal-minimize hide">
+									<i class="octicon octicon-chevron-down" style="padding: 1px 0px;"></i>
+								</button>
+								<button type="button" class="btn btn-default btn-sm btn-modal-close" data-dismiss="modal">
+									<i class="octicon octicon-x visible-xs" style="padding: 1px 0px;"></i>
+									<span class="hidden-xs">${__("Close")}</span>
+								</button>
+								<button type="button" class="btn btn-primary btn-sm hide">
+									${__("Confirm")}
+								</button>
+							</div>
+						</div>
+					</div>
+				</div>
+				<div class="modal-body ui-front">${content}</div>
+			</div>
+		</div>
+	</div>`);
 };
 
-frappe._in = function(source, target) {
-	// returns true if source is in target and both are not empty / falsy
-	if(!source) return false;
-	if(!target) return false;
-	return (target.indexOf(source) !== -1);
+frappe.is_online = function() {
+	if (frappe.boot.developer_mode == 1) {
+		// always online in developer_mode
+		return true;
+	}
+	if ('onLine' in navigator) {
+		return navigator.onLine;
+	}
+	return true;
 };
 
-// add <option> list to <select>
-(function($) {
-	$.fn.add_options = function(options_list) {
-		// create options
-		for(var i=0; i<options_list.length; i++) {
-			var v = options_list[i];
-			if (is_null(v)) {
-				var value = null;
-				var label = null;
-			} else {
-				var is_value_null = is_null(v.value);
-				var is_label_null = is_null(v.label);
+// bind online/offline events
+$(window).on('online', function() {
+	frappe.show_alert({
+		indicator: 'green',
+		message: __('You are connected to internet.')
+	});
+});
 
-				if (is_value_null && is_label_null) {
-					var value = v;
-					var label = __(v);
-				} else {
-					var value = is_value_null ? "" : v.value;
-					var label = is_label_null ? __(value) : __(v.label);
-				}
-			}
-			$('<option>').html(cstr(label)).attr('value', value).appendTo(this);
-		}
-		// select the first option
-		this.selectedIndex = 0;
-		return $(this);
-	}
-	$.fn.set_working = function() {
-		this.prop('disabled', true);
-	}
-	$.fn.done_working = function() {
-		this.prop('disabled', false);
-	}
-})(jQuery);
-
-(function($) {
-	function pasteIntoInput(el, text) {
-		el.focus();
-		if (typeof el.selectionStart == "number") {
-			var val = el.value;
-			var selStart = el.selectionStart;
-			el.value = val.slice(0, selStart) + text + val.slice(el.selectionEnd);
-			el.selectionEnd = el.selectionStart = selStart + text.length;
-		} else if (typeof document.selection != "undefined") {
-			var textRange = document.selection.createRange();
-			textRange.text = text;
-			textRange.collapse(false);
-			textRange.select();
-		}
-	}
-
-	function allowTabChar(el) {
-		$(el).keydown(function(e) {
-			if (e.which == 9) {
-				pasteIntoInput(this, "\t");
-				return false;
-			}
-		});
-
-		// For Opera, which only allows suppression of keypress events, not keydown
-		$(el).keypress(function(e) {
-			if (e.which == 9) {
-				return false;
-			}
-		});
-	}
-
-	$.fn.allowTabs = function() {
-		if (this.jquery) {
-			this.each(function() {
-				if (this.nodeType == 1) {
-					var nodeName = this.nodeName.toLowerCase();
-					if (nodeName == "textarea" || (nodeName == "input" && this.type == "text")) {
-						allowTabChar(this);
-					}
-				}
-			})
-		}
-		return this;
-	}
-})(jQuery);
+$(window).on('offline', function() {
+	frappe.show_alert({
+		indicator: 'orange',
+		message: __('Connection lost. Some features might not work.')
+	});
+});

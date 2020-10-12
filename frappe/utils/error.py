@@ -13,15 +13,15 @@ import traceback
 import linecache
 import pydoc
 import cgitb
-import types
 import datetime
 import json
+import six
 
 def make_error_snapshot(exception):
 	if frappe.conf.disable_error_snapshot:
 		return
 
-	logger = frappe.logger(__name__, with_more_info=False)
+	logger = frappe.logger(with_more_info=True)
 
 	try:
 		error_id = '{timestamp:s}-{ip:s}-{hash:s}'.format(
@@ -49,7 +49,7 @@ def get_snapshot(exception, context=10):
 	"""
 
 	etype, evalue, etb = sys.exc_info()
-	if isinstance(etype, types.ClassType):
+	if isinstance(etype, six.class_types):
 		etype = etype.__name__
 
 	# creates a snapshot dict with some basic information
@@ -64,7 +64,7 @@ def get_snapshot(exception, context=10):
 		'traceback': traceback.format_exc(),
 		'frames': [],
 		'etype': cstr(etype),
-		'evalue': cstr(`evalue`),
+		'evalue': cstr(repr(evalue)),
 		'exception': {},
 		'locals': {}
 	}
@@ -123,22 +123,13 @@ def get_snapshot(exception, context=10):
 	# add exception type, value and attributes
 	if isinstance(evalue, BaseException):
 		for name in dir(evalue):
-			# prevent py26 DeprecationWarning
-			if (name != 'messages' or sys.version_info < (2.6)) and not name.startswith('__'):
+			if name != 'messages' and not name.startswith('__'):
 				value = pydoc.text.repr(getattr(evalue, name))
-
-				# render multilingual string properly
-				if type(value)==str and value.startswith(b"u'"):
-					value = eval(value)
-
 				s['exception'][name] = encode(value)
 
 	# add all local values (of last frame) to the snapshot
 	for name, value in locals.items():
-		if type(value)==str and value.startswith(b"u'"):
-			value = eval(value)
-
-		s['locals'][name] = pydoc.text.repr(value)
+		s['locals'][name] = value if isinstance(value, six.text_type) else pydoc.text.repr(value)
 
 	return s
 
@@ -156,7 +147,7 @@ def collect_error_snapshots():
 			fullpath = os.path.join(path, fname)
 
 			try:
-				with open(fullpath, 'rb') as filedata:
+				with open(fullpath, 'r') as filedata:
 					data = json.load(filedata)
 
 			except ValueError:
@@ -186,7 +177,7 @@ def collect_error_snapshots():
 def clear_old_snapshots():
 	"""Clear snapshots that are older than a month"""
 	frappe.db.sql("""delete from `tabError Snapshot`
-		where creation < date_sub(now(), interval 1 month)""")
+		where creation < (NOW() - INTERVAL '1' MONTH)""")
 
 	path = get_error_snapshot_path()
 	today = datetime.datetime.now()

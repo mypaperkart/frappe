@@ -4,7 +4,7 @@
 from __future__ import unicode_literals, print_function
 
 import frappe, os
-from frappe.core.page.data_import_tool.data_import_tool import import_doc, export_json
+from frappe.core.doctype.data_import.data_import import import_doc, export_json
 
 def sync_fixtures(app=None):
 	"""Import, overwrite fixtures from `[app]/fixtures`"""
@@ -46,13 +46,16 @@ def import_custom_scripts(app):
 						frappe.get_doc({
 							"doctype":"Custom Script",
 							"dt": doctype,
-							"script_type": "Client",
 							"script": script
 						}).insert()
 
-def export_fixtures():
+def export_fixtures(app=None):
 	"""Export fixtures as JSON to `[app]/fixtures`"""
-	for app in frappe.get_installed_apps():
+	if app:
+		apps = [app]
+	else:
+		apps = frappe.get_installed_apps()
+	for app in apps:
 		for fixture in frappe.get_hooks("fixtures", app_name=app):
 			filters = None
 			or_filters = None
@@ -64,4 +67,5 @@ def export_fixtures():
 			if not os.path.exists(frappe.get_app_path(app, "fixtures")):
 				os.mkdir(frappe.get_app_path(app, "fixtures"))
 
-			export_json(fixture, frappe.get_app_path(app, "fixtures", frappe.scrub(fixture) + ".json"), filters=filters, or_filters=or_filters)
+			export_json(fixture, frappe.get_app_path(app, "fixtures", frappe.scrub(fixture) + ".json"),
+				filters=filters, or_filters=or_filters, order_by="idx asc, creation asc")

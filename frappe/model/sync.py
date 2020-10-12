@@ -27,10 +27,35 @@ def sync_for(app_name, force=0, sync_everything = False, verbose=False, reset_pe
 
 	if app_name == "frappe":
 		# these need to go first at time of install
-		for d in (("core", "docfield"), ("core", "docperm"), ("core", "has_role"), ("core", "doctype"),
-			("core", "user"), ("core", "role"), ("custom", "custom_field"),
-			("custom", "property_setter"), ("website", "web_form"),
-			("website", "web_form_field"), ("website", "portal_menu_item")):
+		for d in (("core", "docfield"),
+			("core", "docperm"),
+			("core", "doctype_action"),
+			("core", "doctype_link"),
+			("core", "role"),
+			("core", "has_role"),
+			("core", "doctype"),
+			("core", "user"),
+			("custom", "custom_field"),
+			("custom", "property_setter"),
+			("website", "web_form"),
+			("website", "web_template"),
+			("website", "web_form_field"),
+			("website", "portal_menu_item"),
+			("data_migration", "data_migration_mapping_detail"),
+			("data_migration", "data_migration_mapping"),
+			("data_migration", "data_migration_plan_mapping"),
+			("data_migration", "data_migration_plan"),
+			("desk", "number_card"),
+			("desk", "dashboard_chart"),
+			("desk", "dashboard"),
+			("desk", "onboarding_permission"),
+			("desk", "onboarding_step"),
+			("desk", "onboarding_step_map"),
+			("desk", "module_onboarding"),
+			("desk", "desk_card"),
+			("desk", "desk_chart"),
+			("desk", "desk_shortcut"),
+			("desk", "desk_page")):
 			files.append(os.path.join(frappe.get_app_path("frappe"), d[0],
 				"doctype", d[1], d[1] + ".json"))
 
@@ -42,7 +67,7 @@ def sync_for(app_name, force=0, sync_everything = False, verbose=False, reset_pe
 	if l:
 		for i, doc_path in enumerate(files):
 			import_file_by_path(doc_path, force=force, ignore_version=True,
-				reset_permissions=reset_permissions)
+				reset_permissions=reset_permissions, for_sync=True)
 			#print module_name + ' | ' + doctype + ' | ' + name
 
 			frappe.db.commit()
@@ -50,17 +75,21 @@ def sync_for(app_name, force=0, sync_everything = False, verbose=False, reset_pe
 			# show progress bar
 			update_progress_bar("Updating DocTypes for {0}".format(app_name), i, l)
 
+		# print each progress bar on new line
 		print()
-
 
 def get_doc_files(files, start_path, force=0, sync_everything = False, verbose=False):
 	"""walk and sync all doctypes and pages"""
 
-	document_type = ['doctype', 'page', 'report', 'print_format', 'website_theme', 'web_form', 'email_alert']
-	for doctype in document_type:
+	# load in sequence - warning for devs
+	document_types = ['doctype', 'page', 'report', 'dashboard_chart_source', 'print_format',
+		'website_theme', 'web_form', 'web_template', 'notification', 'print_style',
+		'data_migration_mapping', 'data_migration_plan', 'desk_page',
+		'onboarding_step', 'module_onboarding']
+
+	for doctype in document_types:
 		doctype_path = os.path.join(start_path, doctype)
 		if os.path.exists(doctype_path):
-
 			for docname in os.listdir(doctype_path):
 				if os.path.isdir(os.path.join(doctype_path, docname)):
 					doc_path = os.path.join(doctype_path, docname, docname) + ".json"

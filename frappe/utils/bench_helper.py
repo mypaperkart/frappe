@@ -5,6 +5,7 @@ import os
 import json
 import importlib
 import frappe.utils
+import traceback
 
 click.disable_unicode_literals_warning = True
 
@@ -49,19 +50,26 @@ def app_group(ctx, site=False, force=False, verbose=False, profile=False):
 		ctx.info_name = ''
 
 def get_sites(site_arg):
-	if site_arg and site_arg == 'all':
+	if site_arg == 'all':
 		return frappe.utils.get_sites()
-	else:
-		if site_arg:
-			return [site_arg]
-		if os.path.exists('currentsite.txt'):
-			with open('currentsite.txt') as f:
-				return [f.read().strip()]
+	elif site_arg:
+		return [site_arg]
+	elif os.path.exists('currentsite.txt'):
+		with open('currentsite.txt') as f:
+			site = f.read().strip()
+			if site:
+				return [site]
+	return []
 
 def get_app_commands(app):
-	try:
-		app_command_module = importlib.import_module(app + '.commands')
-	except ImportError:
+	if os.path.exists(os.path.join('..', 'apps', app, app, 'commands.py'))\
+		or os.path.exists(os.path.join('..', 'apps', app, app, 'commands', '__init__.py')):
+		try:
+			app_command_module = importlib.import_module(app + '.commands')
+		except Exception:
+			traceback.print_exc()
+			return []
+	else:
 		return []
 
 	ret = {}
@@ -71,14 +79,14 @@ def get_app_commands(app):
 
 @click.command('get-frappe-commands')
 def get_frappe_commands():
-	commands = get_app_commands('frappe').keys()
+	commands = list(get_app_commands('frappe'))
 
 	for app in get_apps():
 		app_commands = get_app_commands(app)
 		if app_commands:
-			commands.extend(app_commands.keys())
+			commands.extend(list(app_commands))
 
-	print(json.dumps(get_app_commands('frappe').keys()))
+	print(json.dumps(commands))
 
 @click.command('get-frappe-help')
 def get_frappe_help():

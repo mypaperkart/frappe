@@ -5,7 +5,21 @@ frappe.breadcrumbs = {
 	all: {},
 
 	preferred: {
-		"File": ""
+		"File": "",
+		"Dashboard": "Customization",
+		"Dashboard Chart": "Customization",
+		"Dashboard Chart Source": "Customization"
+	},
+
+	module_map: {
+		'Core': 'Settings',
+		'Email': 'Settings',
+		'Custom': 'Settings',
+		'Workflow': 'Settings',
+		'Printing': 'Settings',
+		'Setup': 'Settings',
+		'Event Streaming': 'Tools',
+		'Automation': 'Tools',
 	},
 
 	set_doctype_module: function(doctype, module) {
@@ -17,29 +31,45 @@ frappe.breadcrumbs = {
 	},
 
 	add: function(module, doctype, type) {
-		frappe.breadcrumbs.all[frappe.breadcrumbs.current_page()] = {module:module, doctype:doctype, type:type};
+		let obj;
+		if (typeof module === 'object') {
+			obj = module;
+		} else {
+			obj = {
+				module:module,
+				doctype:doctype,
+				type:type
+			}
+		}
+
+		frappe.breadcrumbs.all[frappe.breadcrumbs.current_page()] = obj;
 		frappe.breadcrumbs.update();
 	},
 
 	current_page: function() {
-		var route = frappe.get_route();
-		// for List/DocType/{?} return List/DocType
-		if (route[0] === 'List') {
-			route = route.slice(0, 2);
-		}
-		return route.join("/");
+		return frappe.get_route_str();
 	},
 
 	update: function() {
 		var breadcrumbs = frappe.breadcrumbs.all[frappe.breadcrumbs.current_page()];
 
 		if(!frappe.visible_modules) {
-			frappe.visible_modules = $.map(frappe.get_desktop_icons(true), (m) => { return m.module_name; });
+			frappe.visible_modules = $.map(frappe.boot.allowed_modules, (m) => {
+				return m.module_name;
+			});
 		}
 
 		var $breadcrumbs = $("#navbar-breadcrumbs").empty();
+
 		if(!breadcrumbs) {
 			$("body").addClass("no-breadcrumbs");
+			return;
+		}
+
+		if (breadcrumbs.type === 'Custom') {
+			const html = `<li><a href="${breadcrumbs.route}">${breadcrumbs.label}</a></li>`;
+			$breadcrumbs.append(html);
+			$("body").removeClass("no-breadcrumbs");
 			return;
 		}
 
@@ -54,27 +84,31 @@ frappe.breadcrumbs = {
 		}
 
 		if(breadcrumbs.module) {
-			if(in_list(["Core", "Email", "Custom", "Workflow", "Print"], breadcrumbs.module)) {
-				breadcrumbs.module = "Setup";
+			if (frappe.breadcrumbs.module_map[breadcrumbs.module]) {
+				breadcrumbs.module = frappe.breadcrumbs.module_map[breadcrumbs.module];
 			}
 
-			if(frappe.get_module(breadcrumbs.module)) {
+			let current_module = breadcrumbs.module
+			// Check if a desk page exists
+			if (frappe.boot.module_page_map[breadcrumbs.module]) {
+				breadcrumbs.module = frappe.boot.module_page_map[breadcrumbs.module];
+			}
+
+			if(frappe.get_module(current_module)) {
 				// if module access exists
-				var module_info = frappe.get_module(breadcrumbs.module),
+				var module_info = frappe.get_module(current_module),
 					icon = module_info && module_info.icon,
 					label = module_info ? module_info.label : breadcrumbs.module;
 
-
 				if(module_info && !module_info.blocked && frappe.visible_modules.includes(module_info.module_name)) {
-					$(repl('<li><a href="#modules/%(module)s">%(label)s</a></li>',
-						{ module: breadcrumbs.module, label: __(label) }))
+					$(repl('<li><a href="#workspace/%(module)s">%(label)s</a></li>',
+						{ module: breadcrumbs.module, label: __(breadcrumbs.module) }))
 						.appendTo($breadcrumbs);
 				}
 			}
 		}
 		if(breadcrumbs.doctype && frappe.get_route()[0]==="Form") {
 			if(breadcrumbs.doctype==="User"
-				&& frappe.user.is_module("Setup")===-1
 				|| frappe.get_doc('DocType', breadcrumbs.doctype).issingle) {
 				// no user listview for non-system managers and single doctypes
 			} else {

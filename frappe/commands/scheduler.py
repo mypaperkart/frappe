@@ -1,9 +1,10 @@
 from __future__ import unicode_literals, absolute_import, print_function
 import click
-import json, sys
+import sys
 import frappe
 from frappe.utils import cint
 from frappe.commands import pass_context, get_site
+from frappe.exceptions import SiteNotSpecifiedError
 
 def _is_scheduler_enabled():
 	enable_scheduler = False
@@ -30,6 +31,8 @@ def trigger_scheduler_event(context, event):
 			frappe.utils.scheduler.trigger(site, event, now=True)
 		finally:
 			frappe.destroy()
+	if not context.sites:
+		raise SiteNotSpecifiedError
 
 @click.command('enable-scheduler')
 @pass_context
@@ -45,6 +48,8 @@ def enable_scheduler(context):
 			print("Enabled for", site)
 		finally:
 			frappe.destroy()
+	if not context.sites:
+		raise SiteNotSpecifiedError
 
 @click.command('disable-scheduler')
 @pass_context
@@ -60,7 +65,8 @@ def disable_scheduler(context):
 			print("Disabled for", site)
 		finally:
 			frappe.destroy()
-
+	if not context.sites:
+		raise SiteNotSpecifiedError
 
 
 @click.command('scheduler')
@@ -115,9 +121,12 @@ def set_maintenance_mode(context, state, site=None):
 
 @click.command('doctor') #Passing context always gets a site and if there is no use site it breaks
 @click.option('--site', help='site name')
-def doctor(site=None):
+@pass_context
+def doctor(context, site=None):
 	"Get diagnostic info about background workers"
 	from frappe.utils.doctor import doctor as _doctor
+	if not site:
+		site = get_site(context, raise_err=False)
 	return _doctor(site=site)
 
 @click.command('show-pending-jobs')
@@ -152,9 +161,10 @@ def start_scheduler():
 
 @click.command('worker')
 @click.option('--queue', type=str)
-def start_worker(queue):
+@click.option('--quiet', is_flag = True, default = False, help = 'Hide Log Outputs')
+def start_worker(queue, quiet = False):
 	from frappe.utils.background_jobs import start_worker
-	start_worker(queue)
+	start_worker(queue, quiet = quiet)
 
 @click.command('ready-for-migration')
 @click.option('--site', help='site name')

@@ -3,18 +3,29 @@
 # For license information, please see license.txt
 
 from __future__ import unicode_literals
-import frappe, json
+import frappe, json, re
+from frappe import _
 from frappe.model.document import Document
 
 class Language(Document):
-	pass
+	def validate(self):
+		validate_with_regex(self.language_code, "Language Code")
+
+	def before_rename(self, old, new, merge=False):
+		validate_with_regex(new, "Name")
+
+def validate_with_regex(name, label):
+	pattern = re.compile("^[a-zA-Z]+[-_]*[a-zA-Z]+$")
+	if not pattern.match(name):
+		frappe.throw(_("""{0} must begin and end with a letter and can only contain letters,
+				hyphen or underscore.""").format(label))
 
 def export_languages_json():
 	'''Export list of all languages'''
 	languages = frappe.db.get_all('Language', fields=['name', 'language_name'])
 	languages = [{'name': d.language_name, 'code': d.name} for d in languages]
 
-	languages.sort(lambda a,b: 1 if a['code'] > b['code'] else -1)
+	languages.sort(key = lambda a: a['code'])
 
 	with open(frappe.get_app_path('frappe', 'geo', 'languages.json'), 'w') as f:
 		f.write(frappe.as_json(languages))

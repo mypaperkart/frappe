@@ -61,7 +61,7 @@ $.extend(frappe.model, {
 		if(frappe.route_options && !doc.parent) {
 			$.each(frappe.route_options, function(fieldname, value) {
 				var df = frappe.meta.has_field(doctype, fieldname);
-				if(df && in_list(['Link', 'Data', 'Select'], df.fieldtype) && !df.no_copy) {
+				if(df && in_list(['Link', 'Data', 'Select', 'Dynamic Link'], df.fieldtype) && !df.no_copy) {
 					doc[fieldname]=value;
 				}
 			});
@@ -85,12 +85,10 @@ $.extend(frappe.model, {
 
 	set_default_values: function(doc, parent_doc) {
 		var doctype = doc.doctype;
-		var docfields = frappe.meta.docfield_list[doctype] || [];
+		var docfields = frappe.meta.get_docfields(doctype);
 		var updated = [];
-
 		for(var fid=0;fid<docfields.length;fid++) {
 			var f = docfields[fid];
-
 			if(!in_list(frappe.model.no_value_type, f.fieldtype) && doc[f.fieldname]==null) {
 				var v = frappe.model.get_default_value(f, doc, parent_doc);
 				if(v) {
@@ -116,7 +114,7 @@ $.extend(frappe.model, {
 		if(meta && meta.istable) return;
 
 		// create empty rows for mandatory table fields
-		frappe.meta.docfield_list[doc.doctype].forEach(function(df) {
+		frappe.meta.get_docfields(doc.doctype).forEach(function(df) {
 			if(df.fieldtype==='Table' && df.reqd) {
 				frappe.model.add_child(doc, df.fieldname);
 			}
@@ -126,17 +124,22 @@ $.extend(frappe.model, {
 	get_default_value: function(df, doc, parent_doc) {
 		var user_default = "";
 		var user_permissions = frappe.defaults.get_user_permissions();
+		let allowed_records = [];
+		let default_doc = null;
+		if(user_permissions) {
+			({allowed_records, default_doc} = frappe.perm.filter_allowed_docs_for_doctype(user_permissions[df.options], doc.doctype));
+		}
 		var meta = frappe.get_meta(doc.doctype);
-		var has_user_permissions = (df.fieldtype==="Link" && user_permissions
-			&& df.ignore_user_permissions != 1 && user_permissions[df.options]);
+		var has_user_permissions = (df.fieldtype==="Link"
+			&& !$.isEmptyObject(user_permissions)
+			&& df.ignore_user_permissions != 1
+			&& allowed_records.length);
 
 		// don't set defaults for "User" link field using User Permissions!
 		if (df.fieldtype==="Link" && df.options!=="User") {
-			// 1 - look in user permissions for document_type=="Setup".
-			// We don't want to include permissions of transactions to be used for defaults.
-			if (df.linked_document_type==="Setup"
-				&& has_user_permissions && user_permissions[df.options].length===1) {
-				return user_permissions[df.options][0];
+			// If user permission has Is Default enabled or single-user permission has found against respective doctype.
+			if (has_user_permissions && default_doc) {
+				return default_doc;
 			}
 
 			if(!df.ignore_user_permissions) {
@@ -157,7 +160,7 @@ $.extend(frappe.model, {
 			}
 
 			var is_allowed_user_default = user_default &&
-				(!has_user_permissions || user_permissions[df.options].indexOf(user_default)!==-1);
+				(!has_user_permissions || allowed_records.includes(user_default));
 
 			// is this user default also allowed as per user permissions?
 			if (is_allowed_user_default) {
@@ -182,7 +185,7 @@ $.extend(frappe.model, {
 
 			} else if (df["default"][0]===":") {
 				var boot_doc = frappe.model.get_default_from_boot_docs(df, doc, parent_doc);
-				var is_allowed_boot_doc = !has_user_permissions || user_permissions[df.options].indexOf(boot_doc)!==-1;
+				var is_allowed_boot_doc = !has_user_permissions || allowed_records.includes(boot_doc);
 
 				if (is_allowed_boot_doc) {
 					return boot_doc;
@@ -193,7 +196,7 @@ $.extend(frappe.model, {
 			}
 
 			// is this default value is also allowed as per user permissions?
-			var is_allowed_default = !has_user_permissions || user_permissions[df.options].indexOf(df["default"])!==-1;
+			var is_allowed_default = !has_user_permissions || allowed_records.includes(df.default);
 			if (df.fieldtype!=="Link" || df.options==="User" || is_allowed_default) {
 				return df["default"];
 			}
@@ -258,7 +261,7 @@ $.extend(frappe.model, {
 				&& !(df && (!from_amend && cint(df.no_copy) == 1))) {
 
 				var value = doc[key] || [];
-				if (df.fieldtype === "Table") {
+				if (frappe.model.table_fields.includes(df.fieldtype)) {
 					for (var i = 0, j = value.length; i < j; i++) {
 						var d = value[i];
 						frappe.model.copy_doc(d, from_amend, newdoc, df.fieldname);
@@ -287,6 +290,10 @@ $.extend(frappe.model, {
 
 		} else if (!opts.source_name && opts.frm) {
 			opts.source_name = opts.frm.doc.name;
+
+		// Allow opening a mapped doc without a source document name
+		} else if (!opts.frm) {
+			opts.source_name = null;
 		}
 
 		return frappe.call({
@@ -295,7 +302,8 @@ $.extend(frappe.model, {
 			args: {
 				method: opts.method,
 				source_name: opts.source_name,
-				selected_children: opts.frm.get_selected()
+				args: opts.args || null,
+				selected_children: opts.frm ? opts.frm.get_selected() : null
 			},
 			freeze: true,
 			callback: function(r) {
@@ -312,27 +320,26 @@ $.extend(frappe.model, {
 });
 
 frappe.create_routes = {};
-frappe.new_doc = function (doctype, opts) {
-	if(opts && $.isPlainObject(opts)) { frappe.route_options = opts; }
-	frappe.model.with_doctype(doctype, function() {
-		if(frappe.create_routes[doctype]) {
-			frappe.set_route(frappe.create_routes[doctype]);
-		} else {
-			frappe.ui.form.quick_entry(doctype, function(doc) {
-				//frappe.set_route('List', doctype);
-				var title = doc.name;
-				var title_field = frappe.get_meta(doc.doctype).title_field;
-				if (title_field) {
-					title = doc[title_field];
-				}
-
-				var route = frappe.get_route();
-				if(route && !(route[0]==='List' && route[1]===doc.doctype)) {
-					frappe.set_route('Form', doc.doctype, doc.name);
-				}
-			});
+frappe.new_doc = function (doctype, opts, init_callback) {
+	if (doctype === 'File') {
+		new frappe.ui.FileUploader({
+			folder: opts ? opts.folder : 'Home'
+		});
+		return;
+	}
+	return new Promise(resolve => {
+		if(opts && $.isPlainObject(opts)) {
+			frappe.route_options = opts;
 		}
+		frappe.model.with_doctype(doctype, function() {
+			if(frappe.create_routes[doctype]) {
+				frappe.set_route(frappe.create_routes[doctype])
+					.then(() => resolve());
+			} else {
+				frappe.ui.form.make_quick_entry(doctype, null, init_callback)
+					.then(() => resolve());
+			}
+		});
+
 	});
 }
-
-

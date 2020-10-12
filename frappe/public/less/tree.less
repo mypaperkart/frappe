@@ -9,7 +9,7 @@
 	margin: 2px 0px;
 }
 
-ul.tree-children {
+.tree-children {
 	padding-left: 20px;
 }
 
@@ -19,8 +19,29 @@ ul.tree-children {
 	padding: 1px;
 }
 
-.tree-link.active i {
-	color: @indicator-blue !important;
+.tree-link .node-parent {
+	color: @text-muted;
+	font-size: 14px;
+	width: 10px;
+	text-align: center;
+}
+
+.tree-link .node-leaf {
+	color: @text-extra-muted;
+}
+
+.tree-link .node-parent, .tree-link .node-leaf {
+	margin-right: 5px;
+}
+
+.tree-link.active {
+	i {
+		color: @indicator-blue;
+	}
+
+	a {
+		color: @text-muted;
+	}
 }
 
 .tree-hover {
@@ -38,16 +59,16 @@ ul.tree-children {
 }
 
 @media (max-width: @screen-xs) {
-	ul.tree-children {
+	.tree-children {
 		padding-left: 10px;
 	}
 }
 
 // decoration
-
-.tree, .tree-node {
+// .tree, .tree-node {
+.tree.with-skeleton, .tree.with-skeleton .tree-node {
 	position: relative;
-	
+
 	&.opened::before, &:last-child::after {
 		content: '';
 		position: absolute;
@@ -56,7 +77,6 @@ ul.tree-children {
 		height: ~"calc(100% - 26px)";
 		width: 1px;
 		background: @border-color;
-		z-index: -1;
 	}
 
 	&:last-child::after {
@@ -66,20 +86,19 @@ ul.tree-children {
 		width: 3px;
 		background: #fff;
 	}
-	
-	&.opened > .tree-children > .tree-node > .tree-link::before {
-		content: '';
-		position: absolute;
-		width: 15px;
-		height: 1px;
-		top: 10px;
-		left: -11px;
-		z-index: -1;
-		background: @border-color;
-	}
 }
 
-.tree.opened::before {
+.tree.with-skeleton .tree-children > .tree-node > .tree-link::before {
+	content: '';
+	position: absolute;
+	width: 12px;
+	height: 1px;
+	top: 10px;
+	left: -11px;
+	background: @border-color;
+}
+
+.tree.with-skeleton.opened::before {
 	left: 23px;
 	top: 33px;
 	height: ~"calc(100% - 67px)";

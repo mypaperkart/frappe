@@ -47,7 +47,7 @@ class TestEvent(unittest.TestCase):
 	def test_event_list(self):
 		frappe.set_user(self.test_user)
 		res = frappe.get_list("Event", filters=[["Event", "subject", "like", "_Test Event%"]], fields=["name", "subject"])
-		self.assertEquals(len(res), 1)
+		self.assertEqual(len(res), 1)
 		subjects = [r.subject for r in res]
 		self.assertTrue("_Test Event 1" in subjects)
 		self.assertFalse("_Test Event 3" in subjects)
@@ -63,7 +63,7 @@ class TestEvent(unittest.TestCase):
 		ev = frappe.get_doc(self.test_records[0]).insert()
 
 		# the name should be same!
-		self.assertEquals(ev.name, name)
+		self.assertEqual(ev.name, name)
 
 	def test_assign(self):
 		from frappe.desk.form.assign_to import add
@@ -71,7 +71,7 @@ class TestEvent(unittest.TestCase):
 		ev = frappe.get_doc(self.test_records[0]).insert()
 
 		add({
-			"assign_to": "test@example.com",
+			"assign_to": ["test@example.com"],
 			"doctype": "Event",
 			"name": ev.name,
 			"description": "Test Assignment"
@@ -79,11 +79,11 @@ class TestEvent(unittest.TestCase):
 
 		ev = frappe.get_doc("Event", ev.name)
 
-		self.assertEquals(ev._assign, json.dumps(["test@example.com"]))
+		self.assertEqual(ev._assign, json.dumps(["test@example.com"]))
 
 		# add another one
 		add({
-			"assign_to": self.test_user,
+			"assign_to": [self.test_user],
 			"doctype": "Event",
 			"name": ev.name,
 			"description": "Test Assignment"
@@ -91,16 +91,16 @@ class TestEvent(unittest.TestCase):
 
 		ev = frappe.get_doc("Event", ev.name)
 
-		self.assertEquals(set(json.loads(ev._assign)), set(["test@example.com", self.test_user]))
+		self.assertEqual(set(json.loads(ev._assign)), set(["test@example.com", self.test_user]))
 
-		# close an assignment
+		# Remove an assignment
 		todo = frappe.get_doc("ToDo", {"reference_type": ev.doctype, "reference_name": ev.name,
 			"owner": self.test_user})
-		todo.status = "Closed"
+		todo.status = "Cancelled"
 		todo.save()
 
 		ev = frappe.get_doc("Event", ev.name)
-		self.assertEquals(ev._assign, json.dumps(["test@example.com"]))
+		self.assertEqual(ev._assign, json.dumps(["test@example.com"]))
 
 		# cleanup
 		ev.delete()
@@ -112,18 +112,18 @@ class TestEvent(unittest.TestCase):
 			"starts_on": "2014-02-01",
 			"event_type": "Public",
 			"repeat_this_event": 1,
-			"repeat_on": "Every Year"
+			"repeat_on": "Yearly"
 		})
 		ev.insert()
 
 		ev_list = get_events("2014-02-01", "2014-02-01", "Administrator", for_reminder=True)
-		self.assertTrue(filter(lambda e: e.name==ev.name, ev_list))
+		self.assertTrue(bool(list(filter(lambda e: e.name==ev.name, ev_list))))
 
 		ev_list1 = get_events("2015-01-20", "2015-01-20", "Administrator", for_reminder=True)
-		self.assertFalse(filter(lambda e: e.name==ev.name, ev_list1))
+		self.assertFalse(bool(list(filter(lambda e: e.name==ev.name, ev_list1))))
 
 		ev_list2 = get_events("2014-02-20", "2014-02-20", "Administrator", for_reminder=True)
-		self.assertFalse(filter(lambda e: e.name==ev.name, ev_list2))
+		self.assertFalse(bool(list(filter(lambda e: e.name==ev.name, ev_list2))))
 
 		ev_list3 = get_events("2015-02-01", "2015-02-01", "Administrator", for_reminder=True)
-		self.assertTrue(filter(lambda e: e.name==ev.name, ev_list3))
+		self.assertTrue(bool(list(filter(lambda e: e.name==ev.name, ev_list3))))

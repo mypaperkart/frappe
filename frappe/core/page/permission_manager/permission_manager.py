@@ -3,12 +3,17 @@
 
 from __future__ import unicode_literals
 import frappe
+from frappe import _
 import frappe.defaults
 from frappe.modules.import_file import get_file_path, read_doc_from_file
 from frappe.translate import send_translations
-from frappe.desk.notifications import delete_notification_count_for
-from frappe.permissions import reset_perms, get_linked_doctypes, get_all_perms, setup_custom_perms
-from frappe import _
+from frappe.core.doctype.doctype.doctype import (clear_permissions_cache,
+	validate_permissions_for_doctype)
+from frappe.permissions import (reset_perms, get_linked_doctypes, get_all_perms,
+	setup_custom_perms, add_permission, update_permission_property)
+from frappe.utils.user import get_users_with_role as _get_user_with_role
+
+not_allowed_in_permission_manager = ["DocType", "Patch Log", "Module Def", "Transaction Log"]
 
 @frappe.whitelist()
 def get_roles_and_doctypes():
@@ -19,7 +24,7 @@ def get_roles_and_doctypes():
 
 	doctypes = frappe.get_all("DocType", filters={
 		"istable": 0,
-		"name": ("not in", "DocType"),
+		"name": ("not in", ",".join(not_allowed_in_permission_manager)),
 	}, or_filters={
 		"ifnull(restrict_to_domain, '')": "",
 		"restrict_to_domain": ("in", active_domains)
@@ -33,9 +38,12 @@ def get_roles_and_doctypes():
 		"restrict_to_domain": ("in", active_domains)
 	}, fields=["name"])
 
+	doctypes_list = [ {"label":_(d.get("name")), "value":d.get("name")} for d in doctypes]
+	roles_list = [ {"label":_(d.get("name")), "value":d.get("name")} for d in roles]
+
 	return {
-		"doctypes": [d.get("name") for d in doctypes],
-		"roles": [d.get("name") for d in roles]
+		"doctypes": sorted(doctypes_list, key=lambda d: d['label']),
+		"roles": sorted(roles_list, key=lambda d: d['label'])
 	}
 
 @frappe.whitelist()
@@ -55,42 +63,23 @@ def get_permissions(doctype=None, role=None):
 		if not d.parent in linked_doctypes:
 			linked_doctypes[d.parent] = get_linked_doctypes(d.parent)
 		d.linked_doctypes = linked_doctypes[d.parent]
+		meta = frappe.get_meta(d.parent)
+		if meta:
+			d.is_submittable = meta.is_submittable
+			d.in_create = meta.in_create
 
 	return out
 
 @frappe.whitelist()
 def add(parent, role, permlevel):
 	frappe.only_for("System Manager")
-	setup_custom_perms(parent)
-
-	frappe.get_doc({
-		"doctype":"Custom DocPerm",
-		"__islocal": 1,
-		"parent": parent,
-		"parenttype": "DocType",
-		"parentfield": "permissions",
-		"role": role,
-		"permlevel": permlevel,
-		"read": 1
-	}).save()
-
-	validate_and_reset(parent)
+	add_permission(parent, role, permlevel)
 
 @frappe.whitelist()
 def update(doctype, role, permlevel, ptype, value=None):
 	frappe.only_for("System Manager")
-
-	out = None
-	if setup_custom_perms(doctype):
-		out = 'refresh'
-
-	name = frappe.get_value('Custom DocPerm', dict(parent=doctype, role=role, permlevel=permlevel))
-
-	frappe.db.sql("""update `tabCustom DocPerm` set `%s`=%s where name=%s"""\
-	 	% (frappe.db.escape(ptype), '%s', '%s'), (value, name))
-	validate_and_reset(doctype)
-
-	return out
+	out = update_permission_property(doctype, role, permlevel, ptype, value)
+	return 'refresh' if out else None
 
 @frappe.whitelist()
 def remove(doctype, role, permlevel):
@@ -103,41 +92,27 @@ def remove(doctype, role, permlevel):
 	if not frappe.get_all('Custom DocPerm', dict(parent=doctype)):
 		frappe.throw(_('There must be atleast one permission rule.'), title=_('Cannot Remove'))
 
-	validate_and_reset(doctype, for_remove=True)
-
-def validate_and_reset(doctype, for_remove=False):
-	from frappe.core.doctype.doctype.doctype import validate_permissions_for_doctype
-	validate_permissions_for_doctype(doctype, for_remove)
-	clear_doctype_cache(doctype)
+	validate_permissions_for_doctype(doctype, for_remove=True)
 
 @frappe.whitelist()
 def reset(doctype):
 	frappe.only_for("System Manager")
 	reset_perms(doctype)
-	clear_doctype_cache(doctype)
-
-def clear_doctype_cache(doctype):
-	frappe.clear_cache(doctype=doctype)
-	delete_notification_count_for(doctype)
-	for user in frappe.db.sql_list("""select distinct `tabHas Role`.parent from `tabHas Role`,
-		tabDocPerm
-			where tabDocPerm.parent = %s
-			and tabDocPerm.role = `tabHas Role`.role""", doctype):
-		frappe.clear_cache(user=user)
+	clear_permissions_cache(doctype)
 
 @frappe.whitelist()
 def get_users_with_role(role):
 	frappe.only_for("System Manager")
-	return [p[0] for p in frappe.db.sql("""select distinct tabUser.name
-		from `tabHas Role`, tabUser where
-			`tabHas Role`.role=%s
-			and tabUser.name != "Administrator"
-			and `tabHas Role`.parent = tabUser.name
-			and tabUser.enabled=1""", role)]
+	return _get_user_with_role(role)
 
 @frappe.whitelist()
 def get_standard_permissions(doctype):
 	frappe.only_for("System Manager")
-	module = frappe.db.get_value("DocType", doctype, "module")
-	path = get_file_path(module, "DocType", doctype)
-	return read_doc_from_file(path).get("permissions")
+	meta = frappe.get_meta(doctype)
+	if meta.custom:
+		doc = frappe.get_doc('DocType', doctype)
+		return [p.as_dict() for p in doc.permissions]
+	else:
+		# also used to setup permissions via patch
+		path = get_file_path(meta.module, "DocType", doctype)
+		return read_doc_from_file(path).get("permissions")

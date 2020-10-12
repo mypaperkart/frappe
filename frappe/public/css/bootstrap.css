@@ -15,7 +15,6 @@ body {
 }
 article,
 aside,
-details,
 figcaption,
 figure,
 footer,
@@ -24,8 +23,7 @@ hgroup,
 main,
 menu,
 nav,
-section,
-summary {
+section {
   display: block;
 }
 audio,
@@ -193,18 +191,15 @@ th {
   *,
   *:before,
   *:after {
-    color: #000 !important;
+    color: #000;
+    background: transparent;
     text-shadow: none !important;
-    background: transparent !important;
     -webkit-box-shadow: none !important;
             box-shadow: none !important;
   }
   a,
   a:visited {
     text-decoration: underline;
-  }
-  a[href]:after {
-    content: " (" attr(href) ")";
   }
   abbr[title]:after {
     content: " (" attr(title) ")";
@@ -257,11 +252,11 @@ th {
   }
   .table td,
   .table th {
-    background-color: #fff !important;
+    background-color: #fff;
   }
   .table-bordered th,
   .table-bordered td {
-    border: 1px solid #ddd !important;
+    border: 1px solid #ddd;
   }
 }
 @font-face {
@@ -3497,7 +3492,7 @@ tbody.collapse.in {
   right: 0;
   bottom: 0;
   left: 0;
-  z-index: 990;
+  z-index: 99;
 }
 .pull-right > .dropdown-menu {
   right: 0;

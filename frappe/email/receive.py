@@ -2,17 +2,17 @@
 # MIT License. See license.txt
 
 from __future__ import unicode_literals
+import six
+from six import iteritems, text_type
 from six.moves import range
-import time, _socket, poplib, imaplib, email, email.utils, datetime, chardet, re, hashlib
+import time, _socket, poplib, imaplib, email, email.utils, datetime, chardet, re
 from email_reply_parser import EmailReplyParser
 from email.header import decode_header
 import frappe
-from frappe import _
+from frappe import _, safe_decode, safe_encode
 from frappe.utils import (extract_email_id, convert_utc_to_user_timezone, now,
 	cint, cstr, strip, markdown, parse_addr)
-from frappe.utils.scheduler import log
-from frappe.utils.file_manager import get_random_filename, save_file, MaxFileSizeReachedError
-import re
+from frappe.core.doctype.file.file import get_random_filename, MaxFileSizeReachedError
 
 class EmailSizeExceededError(frappe.ValidationError): pass
 class EmailTimeoutError(frappe.ValidationError): pass
@@ -47,9 +47,9 @@ class EmailServer:
 		"""Connect to IMAP"""
 		try:
 			if cint(self.settings.use_ssl):
-				self.imap = Timed_IMAP4_SSL(self.settings.host, timeout=frappe.conf.get("pop_timeout"))
+				self.imap = Timed_IMAP4_SSL(self.settings.host, self.settings.incoming_port, timeout=frappe.conf.get("pop_timeout"))
 			else:
-				self.imap = Timed_IMAP4(self.settings.host, timeout=frappe.conf.get("pop_timeout"))
+				self.imap = Timed_IMAP4(self.settings.host, self.settings.incoming_port, timeout=frappe.conf.get("pop_timeout"))
 			self.imap.login(self.settings.username, self.settings.password)
 			# connection established!
 			return True
@@ -67,9 +67,9 @@ class EmailServer:
 		#this method return pop connection
 		try:
 			if cint(self.settings.use_ssl):
-				self.pop = Timed_POP3_SSL(self.settings.host, timeout=frappe.conf.get("pop_timeout"))
+				self.pop = Timed_POP3_SSL(self.settings.host, self.settings.incoming_port, timeout=frappe.conf.get("pop_timeout"))
 			else:
-				self.pop = Timed_POP3(self.settings.host, timeout=frappe.conf.get("pop_timeout"))
+				self.pop = Timed_POP3(self.settings.host, self.settings.incoming_port, timeout=frappe.conf.get("pop_timeout"))
 
 			self.pop.user(self.settings.username)
 			self.pop.pass_(self.settings.password)
@@ -79,7 +79,7 @@ class EmailServer:
 
 		except _socket.error:
 			# log performs rollback and logs error in Error Log
-			log("receive.connect_pop")
+			frappe.log_error("receive.connect_pop")
 
 			# Invalid mail server -- due to refusing connection
 			frappe.msgprint(_('Invalid Mail Server. Please rectify and try again.'))
@@ -189,12 +189,10 @@ class EmailServer:
 		# compare the UIDVALIDITY of email account and imap server
 		uid_validity = self.settings.uid_validity
 
-		responce, message = self.imap.status("Inbox", "(UIDVALIDITY UIDNEXT)")
-		current_uid_validity = self.parse_imap_responce("UIDVALIDITY", message[0])
-		if not current_uid_validity:
-			frappe.throw(_("Can not find UIDVALIDITY in imap status response"))
+		response, message = self.imap.status("Inbox", "(UIDVALIDITY UIDNEXT)")
+		current_uid_validity = self.parse_imap_response("UIDVALIDITY", message[0]) or 0
 
-		uidnext = int(self.parse_imap_responce("UIDNEXT", message[0]) or "1")
+		uidnext = int(self.parse_imap_response("UIDNEXT", message[0]) or "1")
 		frappe.db.set_value("Email Account", self.settings.email_account, "uidnext", uidnext)
 
 		if not uid_validity or uid_validity != current_uid_validity:
@@ -222,9 +220,9 @@ class EmailServer:
 		elif uid_validity == current_uid_validity:
 			return
 
-	def parse_imap_responce(self, cmd, responce):
+	def parse_imap_response(self, cmd, response):
 		pattern = r"(?<={cmd} )[0-9]*".format(cmd=cmd)
-		match = re.search(pattern, responce, re.U | re.I)
+		match = re.search(pattern, response.decode('utf-8'), re.U | re.I)
 		if match:
 			return match.group(0)
 		else:
@@ -237,7 +235,7 @@ class EmailServer:
 
 			if cint(self.settings.use_imap):
 				status, message = self.imap.uid('fetch', message_meta, '(BODY.PEEK[] BODY.PEEK[HEADER] FLAGS)')
-				raw, header, ignore = message
+				raw = message[0]
 
 				self.get_email_seen_status(message_meta, raw[0])
 				self.latest_messages.append(raw[1])
@@ -256,7 +254,7 @@ class EmailServer:
 
 			else:
 				# log performs rollback and logs error in Error Log
-				log("receive.get_messages", self.make_error_msg(msg_num, incoming_mail))
+				frappe.log_error("receive.get_messages", self.make_error_msg(msg_num, incoming_mail))
 				self.errors = True
 				frappe.db.rollback()
 
@@ -282,7 +280,7 @@ class EmailServer:
 		flags = []
 		for flag in imaplib.ParseFlags(flag_string) or []:
 			pattern = re.compile("\w+")
-			match = re.search(pattern, flag)
+			match = re.search(pattern, frappe.as_unicode(flag))
 			flags.append(match.group(0))
 
 		if "Seen" in flags:
@@ -299,7 +297,7 @@ class EmailServer:
 			"Connection timed out",
 		)
 		for message in messages:
-			if message in strip(cstr(e.message)) or message in strip(cstr(getattr(e, 'strerror', ''))):
+			if message in strip(cstr(e)) or message in strip(cstr(getattr(e, 'strerror', ''))):
 				return True
 		return False
 
@@ -343,13 +341,13 @@ class EmailServer:
 			return
 
 		self.imap.select("Inbox")
-		for uid, operation in uid_list.iteritems():
+		for uid, operation in iteritems(uid_list):
 			if not uid: continue
 
 			op = "+FLAGS" if operation == "Read" else "-FLAGS"
 			try:
 				self.imap.uid('STORE', uid, op, '(\\SEEN)')
-			except Exception as e:
+			except Exception:
 				continue
 
 class Email:
@@ -358,8 +356,13 @@ class Email:
 		"""Parses headers, content, attachments from given raw message.
 
 		:param content: Raw message."""
-		self.raw = content
-		self.mail = email.message_from_string(self.raw)
+		if six.PY2:
+			self.mail = email.message_from_string(safe_encode(content))
+		else:
+			if isinstance(content, bytes):
+				self.mail = email.message_from_bytes(content)
+			else:
+				self.mail = email.message_from_string(content)
 
 		self.text_content = ''
 		self.html_content = ''
@@ -393,10 +396,10 @@ class Email:
 		_subject = decode_header(self.mail.get("Subject", "No Subject"))
 		self.subject = _subject[0][0] or ""
 		if _subject[0][1]:
-			self.subject = self.subject.decode(_subject[0][1])
+			self.subject = safe_decode(self.subject, _subject[0][1])
 		else:
 			# assume that the encoding is utf-8
-			self.subject = self.subject.decode("utf-8")[:140]
+			self.subject = safe_decode(self.subject)[:140]
 
 		if not self.subject:
 			self.subject = "No Subject"
@@ -424,7 +427,7 @@ class Email:
 			if encoding:
 				decoded += part.decode(encoding)
 			else:
-				decoded += part.decode('utf-8')
+				decoded += safe_decode(part)
 		return decoded
 
 	def set_content_and_type(self):
@@ -452,12 +455,17 @@ class Email:
 
 	def show_attached_email_headers_in_content(self, part):
 		# get the multipart/alternative message
+		try:
+			from html import escape  # python 3.x
+		except ImportError:
+			from cgi import escape  # python 2.x
+
 		message = list(part.walk())[1]
 		headers = []
 		for key in ('From', 'To', 'Subject', 'Date'):
 			value = cstr(message.get(key))
 			if value:
-				headers.append('{label}: {value}'.format(label=_(key), value=value))
+				headers.append('{label}: {value}'.format(label=_(key), value=escape(value)))
 
 		self.text_content += '\n'.join(headers)
 		self.html_content += '<hr>' + '\n'.join('<p>{0}</p>'.format(h) for h in headers)
@@ -472,7 +480,7 @@ class Email:
 		"""Detect chartset."""
 		charset = part.get_content_charset()
 		if not charset:
-			charset = chardet.detect(str(part))['encoding']
+			charset = chardet.detect(safe_encode(cstr(part)))['encoding']
 
 		return charset
 
@@ -480,7 +488,7 @@ class Email:
 		charset = self.get_charset(part)
 
 		try:
-			return unicode(part.get_payload(decode=True), str(charset), "ignore")
+			return text_type(part.get_payload(decode=True), str(charset), "ignore")
 		except LookupError:
 			return part.get_payload()
 
@@ -506,7 +514,7 @@ class Email:
 				'fcontent': fcontent,
 			})
 
-			cid = (part.get("Content-Id") or "").strip("><")
+			cid = (cstr(part.get("Content-Id")) or "").strip("><")
 			if cid:
 				self.cid_map[fname] = cid
 
@@ -516,12 +524,18 @@ class Email:
 
 		for attachment in self.attachments:
 			try:
-				file_data = save_file(attachment['fname'], attachment['fcontent'],
-					doc.doctype, doc.name, is_private=1)
-				saved_attachments.append(file_data)
+				_file = frappe.get_doc({
+					"doctype": "File",
+					"file_name": attachment['fname'],
+					"attached_to_doctype": doc.doctype,
+					"attached_to_name": doc.name,
+					"is_private": 1,
+					"content": attachment['fcontent']})
+				_file.save()
+				saved_attachments.append(_file)
 
 				if attachment['fname'] in self.cid_map:
-					self.cid_map[file_data.name] = self.cid_map[attachment['fname']]
+					self.cid_map[_file.name] = self.cid_map[attachment['fname']]
 
 			except MaxFileSizeReachedError:
 				# WARNING: bypass max file size exception
@@ -540,6 +554,7 @@ class Email:
 
 # fix due to a python bug in poplib that limits it to 2048
 poplib._MAXLINE = 20480
+imaplib._MAXLINE = 20480
 
 class TimerMixin(object):
 	def __init__(self, *args, **kwargs):
@@ -569,6 +584,7 @@ class Timed_POP3(TimerMixin, poplib.POP3):
 
 class Timed_POP3_SSL(TimerMixin, poplib.POP3_SSL):
 	_super = poplib.POP3_SSL
+
 class Timed_IMAP4(TimerMixin, imaplib.IMAP4):
 	_super = imaplib.IMAP4
 

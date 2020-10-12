@@ -15,41 +15,10 @@ frappe.pages['activity'].on_page_load = function(wrapper) {
 	me.page.set_title(__("Activity"));
 
 	frappe.model.with_doctype("Communication", function() {
-		me.page.list = new frappe.ui.BaseList({
-			hide_refresh: true,
-			page: me.page,
-			method: 'frappe.desk.page.activity.activity.get_feed',
-			parent: $("<div></div>").appendTo(me.page.main),
-			render_view: function (values) {
-				var me = this;
-				wrapper = me.page.main.find(".result-list").get(0)
-				values.map(function (value) {
-					var row = $('<div class="list-row">')
-						.data("data", value)
-						.appendTo($(wrapper)).get(0);
-					new frappe.activity.Feed(row, value);
-				});
-			},
-			show_filters: true,
-			doctype: "Communication",
-			get_args: function() {
-				if (frappe.route_options && frappe.route_options.show_likes) {
-					delete frappe.route_options.show_likes;
-					return {
-						show_likes: true
-					}
-				} else {
-					return {}
-				}
-			}
+		me.page.list = new frappe.views.Activity({
+			doctype: 'Communication',
+			parent: wrapper
 		});
-
-		me.page.list.run();
-
-		me.page.set_primary_action(__("Refresh"), function() {
-			me.page.list.filter_list.clear_filters();
-			me.page.list.run();
-		}, "octicon octicon-sync");
 	});
 
 	frappe.activity.render_heatmap(me.page);
@@ -59,6 +28,12 @@ frappe.pages['activity'].on_page_load = function(wrapper) {
 			link_name = $(this).attr("data-link-name"),
 			doctype = $(this).attr("data-doctype"),
 			docname = $(this).attr("data-docname");
+
+		[link_doctype, link_name, doctype, docname] =
+			[link_doctype, link_name, doctype, docname].map(decodeURIComponent);
+
+		link_doctype = link_doctype && link_doctype !== 'null' ? link_doctype : null;
+		link_name = link_name && link_name !== 'null' ? link_name : null;
 
 		if (doctype && docname) {
 			if (link_doctype && link_name) {
@@ -74,24 +49,17 @@ frappe.pages['activity'].on_page_load = function(wrapper) {
 	// Build Report Button
 	if(frappe.boot.user.can_get_report.indexOf("Feed")!=-1) {
 		this.page.add_menu_item(__('Build Report'), function() {
-			frappe.set_route('Report', "Feed");
+			frappe.set_route("List", "Feed", "Report");
 		}, 'fa fa-th')
 	}
 
-	this.page.add_menu_item(__('Authentication Log'), function() {
+	this.page.add_menu_item(__('Activity Log'), function() {
 		frappe.route_options = {
 			"user": frappe.session.user
 		}
 
-		frappe.set_route('Report', "Authentication Log");
-	}, 'fa fa-th')
-
-	this.page.add_menu_item(__('Show Likes'), function() {
-		frappe.route_options = {
-			show_likes: true
-		};
-		me.page.list.run();
-	}, 'octicon octicon-heart');
+		frappe.set_route("List", "Activity Log", "Report");
+	}, 'fa fa-th');
 };
 
 frappe.pages['activity'].on_page_show = function() {
@@ -180,34 +148,68 @@ frappe.activity.render_heatmap = function(page) {
 		method: "frappe.desk.page.activity.activity.get_heatmap_data",
 		callback: function(r) {
 			if(r.message) {
-				var legend = [];
-				var max = Math.max.apply(this, $.map(r.message, function(v) { return v }));
-				var legend = [cint(max/5), cint(max*2/5), cint(max*3/5), cint(max*4/5)];
-				var heatmap = new CalHeatMap();
-				heatmap.init({
-					itemSelector: ".heatmap",
-					domain: "month",
-					subDomain: "day",
-					start: moment().subtract(1, 'year').add(1, 'month').toDate(),
-					cellSize: 9,
-					cellPadding: 2,
-					domainGutter: 2,
-					range: 12,
-					domainLabelFormat: function(date) {
-						return moment(date).format("MMM").toUpperCase();
-					},
-					displayLegend: false,
-					legend: legend,
-					tooltip: true,
-					subDomainTitleFormat: {
-						empty: "{date}",
-						filled: "{count} actions on {date}"
-					},
-					subDomainDateFormat: "%d-%b"
+				var heatmap = new frappe.Chart(".heatmap", {
+					type: 'heatmap',
+					start: new Date(moment().subtract(1, 'year').toDate()),
+					countLabel: "actions",
+					discreteDomains: 0,
+					data: {
+						'dataPoints': r.message
+					}
 				});
-
-				heatmap.update(r.message);
 			}
 		}
 	})
 }
+
+frappe.views.Activity = class Activity extends frappe.views.BaseList {
+	constructor(opts) {
+		super(opts);
+		this.show();
+	}
+
+	setup_defaults() {
+		super.setup_defaults();
+
+		this.page_title = __('Activity');
+		this.doctype = 'Communication';
+		this.method = 'frappe.desk.page.activity.activity.get_feed';
+
+	}
+
+	setup_filter_area() {
+		//
+	}
+
+	setup_sort_selector() {
+
+	}
+
+	setup_side_bar() {
+
+	}
+
+	get_args() {
+		return {
+			start: this.start,
+			page_length: this.page_length
+		};
+	}
+
+	update_data(r) {
+		let data = r.message || [];
+
+		if (this.start === 0) {
+			this.data = data;
+		} else {
+			this.data = this.data.concat(data);
+		}
+	}
+
+	render() {
+		this.data.map(value => {
+			const row = $('<div class="list-row">').data("data", value).appendTo(this.$result).get(0);
+			new frappe.activity.Feed(row, value);
+		});
+	}
+};

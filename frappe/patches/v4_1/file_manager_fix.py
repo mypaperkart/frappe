@@ -5,7 +5,7 @@ from __future__ import unicode_literals, print_function
 
 import frappe
 import os
-from frappe.utils.file_manager import get_content_hash, get_file, get_file_name
+from frappe.core.doctype.file.file import get_content_hash, get_file_name
 from frappe.utils import get_files_path, get_site_path
 
 # The files missed by the previous patch might have been replaced with new files
@@ -19,6 +19,8 @@ from frappe.utils import get_files_path, get_site_path
 #   a backup from a time before version 3 migration
 #
 # * Patch remaining unpatched File records.
+from six import iteritems
+
 
 def execute():
 	frappe.db.auto_commit_on_many_writes = True
@@ -34,7 +36,8 @@ def execute():
 		else:
 			b.file_url = os.path.normpath('/files/' + old_file_name)
 		try:
-			_file_name, content = get_file(name)
+			_file = frappe.get_doc("File", {"file_name": name})
+			content = _file.get_content()
 			b.content_hash = get_content_hash(content)
 		except IOError:
 			print('Warning: Error processing ', name)
@@ -49,7 +52,7 @@ def get_replaced_files():
 	old_files = dict(frappe.db.sql("select name, file_name from `tabFile` where ifnull(content_hash, '')=''"))
 	invfiles = invert_dict(new_files)
 
-	for nname, nfilename in new_files.iteritems():
+	for nname, nfilename in iteritems(new_files):
 		if 'files/' + nfilename in old_files.values():
 			ret.append((nfilename, invfiles[nfilename]))
 	return ret
@@ -82,7 +85,7 @@ def rename_replacing_files():
 
 def invert_dict(ddict):
 	ret = {}
-	for k,v in ddict.iteritems():
+	for k,v in iteritems(ddict):
 		if not ret.get(v):
 			ret[v] = [k]
 		else:

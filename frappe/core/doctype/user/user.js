@@ -2,7 +2,7 @@ frappe.ui.form.on('User', {
 	before_load: function(frm) {
 		var update_tz_select = function(user_language) {
 			frm.set_df_property("time_zone", "options", [""].concat(frappe.all_timezones));
-		}
+		};
 
 		if(!frappe.all_timezones) {
 			frappe.call({
@@ -17,16 +17,38 @@ frappe.ui.form.on('User', {
 		}
 
 	},
+
+	role_profile_name: function(frm) {
+		if(frm.doc.role_profile_name) {
+			frappe.call({
+				"method": "frappe.core.doctype.user.user.get_role_profile",
+				args: {
+					role_profile: frm.doc.role_profile_name
+				},
+				callback: function(data) {
+					frm.set_value("roles", []);
+					$.each(data.message || [], function(i, v){
+						var d = frm.add_child("roles");
+						d.role = v.role;
+					});
+					frm.roles_editor.show();
+				}
+			});
+		}
+	},
+
 	onload: function(frm) {
-		if(has_common(frappe.user_roles, ["Administrator", "System Manager"]) && !frm.doc.__islocal) {
+		frm.can_edit_roles = has_access_to_edit_user();
+
+		if(frm.can_edit_roles && !frm.is_new()) {
 			if(!frm.roles_editor) {
 				var role_area = $('<div style="min-height: 300px">')
 					.appendTo(frm.fields_dict.roles_html.wrapper);
-				frm.roles_editor = new frappe.RoleEditor(role_area, frm);
+				frm.roles_editor = new frappe.RoleEditor(role_area, frm, frm.doc.role_profile_name ? 1 : 0);
 
 				var module_area = $('<div style="min-height: 300px">')
 					.appendTo(frm.fields_dict.modules_html.wrapper);
-				frm.module_editor = new frappe.ModuleEditor(frm, module_area)
+				frm.module_editor = new frappe.ModuleEditor(frm, module_area);
 			} else {
 				frm.roles_editor.show();
 			}
@@ -34,6 +56,10 @@ frappe.ui.form.on('User', {
 	},
 	refresh: function(frm) {
 		var doc = frm.doc;
+		if(!frm.is_new() && !frm.roles_editor && frm.can_edit_roles) {
+			frm.reload_doc();
+			return;
+		}
 
 		if(doc.name===frappe.session.user && !doc.__unsaved
 			&& frappe.all_timezones
@@ -45,22 +71,19 @@ frappe.ui.form.on('User', {
 
 		frm.toggle_display(['sb1', 'sb3', 'modules_access'], false);
 
-		if(!doc.__islocal){
-			frm.add_custom_button(__("Set Desktop Icons"), function() {
-				frappe.route_options = {
-					"user": doc.name
-				};
-				frappe.set_route("modules_setup");
-			}, null, "btn-default")
-
-			if(has_common(frappe.user_roles, ["Administrator", "System Manager"])) {
+		if(!frm.is_new()) {
+			if(has_access_to_edit_user()) {
 
 				frm.add_custom_button(__("Set User Permissions"), function() {
 					frappe.route_options = {
 						"user": doc.name
 					};
-					frappe.set_route("user-permissions");
-				}, null, "btn-default")
+					frappe.set_route('List', 'User Permission');
+				}, __("Permissions"));
+
+				frm.add_custom_button(__('View Permitted Documents'),
+					() => frappe.set_route('query-report', 'Permitted Documents For User',
+						{user: frm.doc.name}), __("Permissions"));
 
 				frm.toggle_display(['sb1', 'sb3', 'modules_access'], true);
 			}
@@ -71,12 +94,69 @@ frappe.ui.form.on('User', {
 					args: {
 						"user": frm.doc.name
 					}
-				})
-			})
+				});
+			}, __("Password"));
+
+			if (frappe.user.has_role("System Manager")) {
+				frappe.db.get_single_value("LDAP Settings", "enabled").then((value) => {
+					if (value === 1 && frm.doc.name != "Administrator") {
+						frm.add_custom_button(__("Reset LDAP Password"), function() {
+							const d = new frappe.ui.Dialog({
+								title: __("Reset LDAP Password"),
+								fields: [
+									{
+										label: __("New Password"),
+										fieldtype: "Password",
+										fieldname: "new_password",
+										reqd: 1
+									},
+									{
+										label: __("Confirm New Password"),
+										fieldtype: "Password",
+										fieldname: "confirm_password",
+										reqd: 1
+									},
+									{
+										label: __("Logout All Sessions"),
+										fieldtype: "Check",
+										fieldname: "logout_sessions"
+									}
+								],
+								primary_action: (values) => {
+									d.hide();
+									if (values.new_password !== values.confirm_password) {
+										frappe.throw(__("Passwords do not match!"));
+									}
+									frappe.call(
+										"frappe.integrations.doctype.ldap_settings.ldap_settings.reset_password", {
+											user: frm.doc.email,
+											password: values.new_password,
+											logout: values.logout_sessions
+										});
+								}
+							});
+							d.show();
+						}, __("Password"));
+					}
+				});
+			}
+
+			frm.add_custom_button(__("Reset OTP Secret"), function() {
+				frappe.call({
+					method: "frappe.core.doctype.user.user.reset_otp_secret",
+					args: {
+						"user": frm.doc.name
+					}
+				});
+			}, __("Password"));
 
 			frm.trigger('enabled');
 
-			frm.roles_editor && frm.roles_editor.show();
+			if (frm.roles_editor && frm.can_edit_roles) {
+				frm.roles_editor.disable = frm.doc.role_profile_name ? 1 : 0;
+				frm.roles_editor.show();
+			}
+
 			frm.module_editor && frm.module_editor.refresh();
 
 			if(frappe.session.user==doc.name) {
@@ -95,8 +175,8 @@ frappe.ui.form.on('User', {
 			}
 			if (!found){
 				frm.add_custom_button(__("Create User Email"), function() {
-					frm.events.create_user_email(frm)
-				})
+					frm.events.create_user_email(frm);
+				});
 			}
 		}
 
@@ -105,23 +185,24 @@ frappe.ui.form.on('User', {
 			for ( var i=0;i<frm.doc.user_emails.length;i++) {
 				frm.doc.user_emails[i].idx=frm.doc.user_emails[i].idx+1;
 			}
-			cur_frm.dirty();
+			frm.dirty();
 		}
+
 	},
 	validate: function(frm) {
 		if(frm.roles_editor) {
-			frm.roles_editor.set_roles_in_table()
+			frm.roles_editor.set_roles_in_table();
 		}
 	},
 	enabled: function(frm) {
 		var doc = frm.doc;
-		if(!doc.__islocal && has_common(frappe.user_roles, ["Administrator", "System Manager"])) {
+		if(!frm.is_new() && has_access_to_edit_user()) {
 			frm.toggle_display(['sb1', 'sb3', 'modules_access'], doc.enabled);
 			frm.set_df_property('enabled', 'read_only', 0);
 		}
 
 		if(frappe.session.user!=="Administrator") {
-			frm.toggle_enable('email', doc.__islocal);
+			frm.toggle_enable('email', frm.is_new());
 		}
 	},
 	create_user_email:function(frm) {
@@ -131,27 +212,49 @@ frappe.ui.form.on('User', {
 				email: frm.doc.email
 			},
 			callback: function(r) {
-				if (r.message == undefined) {
+				if (!Array.isArray(r.message)) {
 					frappe.route_options = {
 						"email_id": frm.doc.email,
 						"awaiting_password": 1,
 						"enable_incoming": 1
 					};
-					frappe.model.with_doctype("Email Account", function (doc) {
+					frappe.model.with_doctype("Email Account", function(doc) {
 						var doc = frappe.model.get_new_doc("Email Account");
 						frappe.route_flags.linked_user = frm.doc.name;
 						frappe.route_flags.delete_user_from_locals = true;
 						frappe.set_route("Form", "Email Account", doc.name);
-					})
+					});
 				} else {
 					frappe.route_flags.create_user_account = frm.doc.name;
 					frappe.set_route("Form", "Email Account", r.message[0]["name"]);
 				}
 			}
-		})
+		});
+	},
+	generate_keys: function(frm){
+		frappe.call({
+			method: 'frappe.core.doctype.user.user.generate_keys',
+			args: {
+				user: frm.doc.name
+			},
+			callback: function(r){
+				if(r.message){
+					frappe.msgprint(__("Save API Secret: ") + r.message.api_secret);
+				}
+			}
+		});
 	}
-})
+});
 
+function has_access_to_edit_user() {
+	return has_common(frappe.user_roles, get_roles_for_editing_user());
+}
+
+function get_roles_for_editing_user() {
+	return frappe.get_meta('User').permissions
+		.filter(perm => perm.permlevel >= 1 && perm.write)
+		.map(perm => perm.role) || ['System Manager'];
+}
 
 frappe.ModuleEditor = Class.extend({
 	init: function(frm, wrapper) {
@@ -181,10 +284,14 @@ frappe.ModuleEditor = Class.extend({
 			var module = $(this).attr('data-module');
 			if($(this).prop("checked")) {
 				// remove from block_modules
-				me.frm.doc.block_modules = $.map(me.frm.doc.block_modules || [], function(d) { if(d.module != module){ return d } });
+				me.frm.doc.block_modules = $.map(me.frm.doc.block_modules || [], function(d) {
+					if (d.module != module) {
+						return d;
+					}
+				});
 			} else {
 				me.frm.add_child("block_modules", {"module": module});
 			}
 		});
 	}
-})
+});

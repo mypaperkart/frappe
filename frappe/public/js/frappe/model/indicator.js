@@ -21,13 +21,16 @@ frappe.get_indicator = function(doc, doctype) {
 
 	if(!doctype) doctype = doc.doctype;
 
+	var workflow = frappe.workflow.workflows[doctype];
+	var without_workflow = workflow ? workflow['override_status'] : true;
+
 	var settings = frappe.listview_settings[doctype] || {};
 
 	var is_submittable = frappe.model.is_submittable(doctype),
 		workflow_fieldname = frappe.workflow.get_state_fieldname(doctype);
 
 	// workflow
-	if(workflow_fieldname) {
+	if(workflow_fieldname && !without_workflow) {
 		var value = doc[workflow_fieldname];
 		if(value) {
 			var colour = "";
@@ -38,6 +41,8 @@ frappe.get_indicator = function(doc, doctype) {
 					"Warning": "orange",
 					"Danger": "red",
 					"Primary": "blue",
+					"Inverse": "black",
+					"Info": "light-blue",
 				}[locals["Workflow State"][value].style];
 			}
 			if(!colour) colour = "darkgrey";
@@ -52,7 +57,7 @@ frappe.get_indicator = function(doc, doctype) {
 	}
 
 	// cancelled
-	if(is_submittable && doc.docstatus==2) {
+	if(is_submittable && doc.docstatus==2 && !settings.has_indicator_for_cancelled) {
 		return [__("Cancelled"), "red", "docstatus,=,2"];
 	}
 

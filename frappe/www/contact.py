@@ -7,6 +7,8 @@ import frappe
 from frappe.utils import now
 from frappe import _
 
+sitemap = 1
+
 def get_context(context):
 	doc = frappe.get_doc("Contact Us Settings", "Contact Us Settings")
 
@@ -16,7 +18,10 @@ def get_context(context):
 		query_options = ["Sales", "Support", "General"]
 
 	out = {
-		"query_options": query_options
+		"query_options": query_options,
+		"parents": [
+			{ "name": _("Home"), "route": "/" }
+		]
 	}
 	out.update(doc.as_dict())
 

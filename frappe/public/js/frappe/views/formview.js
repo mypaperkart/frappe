@@ -3,8 +3,8 @@
 
 frappe.provide('frappe.views.formview');
 
-frappe.views.FormFactory = frappe.views.Factory.extend({
-	make: function(route) {
+frappe.views.FormFactory = class FormFactory extends frappe.views.Factory {
+	make(route) {
 		var me = this,
 			dt = route[1];
 
@@ -12,13 +12,12 @@ frappe.views.FormFactory = frappe.views.Factory.extend({
 			frappe.model.with_doctype(dt, function() {
 				me.page = frappe.container.add_page("Form/" + dt);
 				frappe.views.formview[dt] = me.page;
-				me.page.frm = new _f.Frm(dt, me.page, true);
+				me.page.frm = new frappe.ui.form.Form(dt, me.page, true);
 				me.show_doc(route);
 			});
 		} else {
 			me.show_doc(route);
 		}
-
 
 		if(!this.initialized) {
 			$(document).on("page-change", function() {
@@ -38,14 +37,21 @@ frappe.views.FormFactory = frappe.views.Factory.extend({
 			});
 
 			frappe.realtime.on("doc_viewers", function(data) {
-				frappe.ui.form.set_viewers(data);
+				// set users that currently viewing the form
+				frappe.ui.form.set_users(data, 'viewers');
+			});
+
+			frappe.realtime.on("doc_typers", function(data) {
+				// set users that currently typing on the form
+				frappe.ui.form.set_users(data, 'typers');
 			});
 		}
 
 
 		this.initialized = true;
-	},
-	show_doc: function(route) {
+	}
+
+	show_doc(route) {
 		var dt = route[1],
 			dn = route.slice(2).join("/"),
 			me = this;
@@ -77,10 +83,10 @@ frappe.views.FormFactory = frappe.views.Factory.extend({
 			}
 			me.load(dt, dn);
 		});
+	}
 
-	},
-	load: function(dt, dn) {
+	load(dt, dn) {
 		frappe.container.change_to("Form/" + dt);
 		frappe.views.formview[dt].frm.refresh(dn);
 	}
-});
+}

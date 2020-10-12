@@ -4,26 +4,29 @@
 from __future__ import unicode_literals
 
 import os
-import MySQLdb
+from six import iteritems
+import logging
 
 from werkzeug.wrappers import Request
 from werkzeug.local import LocalManager
 from werkzeug.exceptions import HTTPException, NotFound
-from werkzeug.contrib.profiler import ProfilerMiddleware
-from werkzeug.wsgi import SharedDataMiddleware
+from werkzeug.middleware.profiler import ProfilerMiddleware
+from werkzeug.middleware.shared_data import SharedDataMiddleware
 
 import frappe
 import frappe.handler
 import frappe.auth
 import frappe.api
-import frappe.async
 import frappe.utils.response
 import frappe.website.render
-from frappe.utils import get_site_name
+from frappe.utils import get_site_name, sanitize_html
 from frappe.middlewares import StaticDataMiddleware
 from frappe.utils.error import make_error_snapshot
-from frappe.core.doctype.communication.comment import update_comments_in_parent_after_request
+from frappe.core.doctype.comment.comment import update_comments_in_parent_after_request
 from frappe import _
+import frappe.recorder
+import frappe.monitor
+import frappe.rate_limiter
 
 local_manager = LocalManager([frappe.local])
 
@@ -41,7 +44,6 @@ class RequestContext(object):
 	def __exit__(self, type, value, traceback):
 		frappe.destroy()
 
-
 @Request.application
 def application(request):
 	response = None
@@ -51,12 +53,14 @@ def application(request):
 
 		init_request(request)
 
+		frappe.recorder.record()
+		frappe.monitor.start()
+		frappe.rate_limiter.apply()
+
 		if frappe.local.form_dict.cmd:
 			response = frappe.handler.handle()
 
 		elif frappe.request.path.startswith("/api/"):
-			if frappe.local.form_dict.data is None:
-					frappe.local.form_dict.data = request.get_data()
 			response = frappe.api.handle()
 
 		elif frappe.request.path.startswith('/backups'):
@@ -91,6 +95,24 @@ def application(request):
 		if response and hasattr(frappe.local, 'cookie_manager'):
 			frappe.local.cookie_manager.flush_cookies(response=response)
 
+		frappe.rate_limiter.update()
+		frappe.monitor.stop(response)
+		frappe.recorder.dump()
+
+		if hasattr(frappe.local, 'conf') and frappe.local.conf.enable_frappe_logger:
+			frappe.logger("frappe.web", allow_site=frappe.local.site).info({
+				"site": get_site_name(request.host),
+				"remote_addr": getattr(request, "remote_addr", "NOTFOUND"),
+				"base_url": getattr(request, "base_url", "NOTFOUND"),
+				"full_path": getattr(request, "full_path", "NOTFOUND"),
+				"method": getattr(request, "method", "NOTFOUND"),
+				"scheme": getattr(request, "scheme", "NOTFOUND"),
+				"http_status_code": getattr(response, "status_code", "NOTFOUND")
+			})
+
+		if response and hasattr(frappe.local, 'rate_limiter'):
+			response.headers.extend(frappe.local.rate_limiter.headers())
+
 		frappe.destroy()
 
 	return response
@@ -107,15 +129,27 @@ def init_request(request):
 		raise NotFound
 
 	if frappe.local.conf.get('maintenance_mode'):
-		raise frappe.SessionStopped
+		frappe.connect()
+		raise frappe.SessionStopped('Session Stopped')
 
 	make_form_dict(request)
 
 	frappe.local.http_request = frappe.auth.HTTPRequest()
 
 def make_form_dict(request):
-	frappe.local.form_dict = frappe._dict({ k:v[0] if isinstance(v, (list, tuple)) else v \
-		for k, v in (request.form or request.args).iteritems() })
+	import json
+
+	request_data = request.get_data(as_text=True)
+	if 'application/json' in (request.content_type or '') and request_data:
+		args = json.loads(request_data)
+	else:
+		args = request.form or request.args
+
+	try:
+		frappe.local.form_dict = frappe._dict({ k:v[0] if isinstance(v, (list, tuple)) else v \
+			for k, v in iteritems(args) })
+	except IndexError:
+		frappe.local.form_dict = frappe._dict(args)
 
 	if "_" in frappe.local.form_dict:
 		# _ is passed by $.ajax so that the request is not cached by the browser. So, remove _ from form_dict
@@ -126,17 +160,14 @@ def handle_exception(e):
 	http_status_code = getattr(e, "http_status_code", 500)
 	return_as_message = False
 
-	if frappe.local.is_ajax or 'application/json' in frappe.local.request.headers.get('Accept', ''):
+	if frappe.get_request_header('Accept') and (frappe.local.is_ajax or 'application/json' in frappe.get_request_header('Accept')):
 		# handle ajax responses first
 		# if the request is ajax, send back the trace or error message
 		response = frappe.utils.response.report_error(http_status_code)
 
 	elif (http_status_code==500
-		and isinstance(e, MySQLdb.OperationalError)
-		and e.args[0] in (1205, 1213)):
-			# 1205 = lock wait timeout
-			# 1213 = deadlock
-			# code 409 represents conflict
+		and (frappe.db and isinstance(e, frappe.db.InternalError))
+		and (frappe.db and (frappe.db.is_deadlocked(e) or frappe.db.is_timedout(e)))):
 			http_status_code = 508
 
 	elif http_status_code==401:
@@ -157,14 +188,18 @@ def handle_exception(e):
 			http_status_code=http_status_code,  indicator_color='red')
 		return_as_message = True
 
+	elif http_status_code == 429:
+		response = frappe.rate_limiter.respond()
+
 	else:
-		traceback = "<pre>"+frappe.get_traceback()+"</pre>"
-		if frappe.local.flags.disable_traceback:
+		traceback = "<pre>" + sanitize_html(frappe.get_traceback()) + "</pre>"
+		# disable traceback in production if flag is set
+		if frappe.local.flags.disable_traceback and not frappe.local.dev_server:
 			traceback = ""
 
 		frappe.respond_as_web_page("Server Error",
 			traceback, http_status_code=http_status_code,
-			indicator_color='red')
+			indicator_color='red', width=640)
 		return_as_message = True
 
 	if e.__class__ == frappe.AuthenticationError:
@@ -172,11 +207,11 @@ def handle_exception(e):
 			frappe.local.login_manager.clear_cookies()
 
 	if http_status_code >= 500:
-		frappe.logger().error('Request Error', exc_info=True)
 		make_error_snapshot(e)
 
 	if return_as_message:
-		response = frappe.website.render.render("message", http_status_code=http_status_code)
+		response = frappe.website.render.render("message",
+			http_status_code=http_status_code)
 
 	return response
 
@@ -199,7 +234,7 @@ def after_request(rollback):
 
 application = local_manager.make_middleware(application)
 
-def serve(port=8000, profile=False, site=None, sites_path='.'):
+def serve(port=8000, profile=False, no_reload=False, no_threading=False, site=None, sites_path='.'):
 	global application, _site, _sites_path
 	_site = site
 	_sites_path = sites_path
@@ -211,11 +246,11 @@ def serve(port=8000, profile=False, site=None, sites_path='.'):
 
 	if not os.environ.get('NO_STATICS'):
 		application = SharedDataMiddleware(application, {
-			b'/assets': os.path.join(sites_path, 'assets').encode("utf-8"),
+			str('/assets'): str(os.path.join(sites_path, 'assets'))
 		})
 
 		application = StaticDataMiddleware(application, {
-			b'/files': os.path.abspath(sites_path).encode("utf-8")
+			str('/files'): str(os.path.abspath(sites_path))
 		})
 
 	application.debug = True
@@ -223,9 +258,15 @@ def serve(port=8000, profile=False, site=None, sites_path='.'):
 		'SERVER_NAME': 'localhost:8000'
 	}
 
+	log = logging.getLogger('werkzeug')
+	log.propagate = False
+
 	in_test_env = os.environ.get('CI')
+	if in_test_env:
+		log.setLevel(logging.ERROR)
+
 	run_simple('0.0.0.0', int(port), application,
-		use_reloader=not in_test_env,
+		use_reloader=False if in_test_env else not no_reload,
 		use_debugger=not in_test_env,
 		use_evalex=not in_test_env,
-		threaded=True)
+		threaded=not no_threading)

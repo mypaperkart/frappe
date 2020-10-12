@@ -2,7 +2,7 @@
 # MIT License. See license.txt
 
 from __future__ import unicode_literals
-import frappe, os
+import frappe, os, json
 
 from frappe.model.document import Document
 
@@ -10,7 +10,8 @@ class ModuleDef(Document):
 	def on_update(self):
 		"""If in `developer_mode`, create folder for module and
 			add in `modules.txt` of app if missing."""
-		if frappe.conf.get("developer_mode"):
+		frappe.clear_cache()
+		if not self.custom and frappe.conf.get("developer_mode"):
 			self.create_modules_folder()
 			self.add_to_modules_txt()
 
@@ -29,7 +30,7 @@ class ModuleDef(Document):
 			with open(frappe.get_app_path(self.app_name, "modules.txt"), "r") as f:
 				content = f.read()
 				if not self.name in content.splitlines():
-					modules = filter(None, content.splitlines())
+					modules = list(filter(None, content.splitlines()))
 					modules.append(self.name)
 
 			if modules:
@@ -38,3 +39,28 @@ class ModuleDef(Document):
 
 				frappe.clear_cache()
 				frappe.setup_module_map()
+
+	def on_trash(self):
+		"""Delete module name from modules.txt"""
+
+		if frappe.flags.in_uninstall or self.custom:
+			return
+
+		modules = None
+		if frappe.local.module_app.get(frappe.scrub(self.name)):
+			with open(frappe.get_app_path(self.app_name, "modules.txt"), "r") as f:
+				content = f.read()
+				if self.name in content.splitlines():
+					modules = list(filter(None, content.splitlines()))
+					modules.remove(self.name)
+
+			if modules:
+				with open(frappe.get_app_path(self.app_name, "modules.txt"), "w") as f:
+					f.write("\n".join(modules))
+
+				frappe.clear_cache()
+				frappe.setup_module_map()
+
+@frappe.whitelist()
+def get_installed_apps():
+	return json.dumps(frappe.get_installed_apps())

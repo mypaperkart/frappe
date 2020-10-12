@@ -12,30 +12,38 @@ from __future__ import unicode_literals, print_function
 
 	where patch1, patch2 is module name
 """
-import frappe, frappe.permissions
+import frappe, frappe.permissions, time
 
 # for patches
 import os
 
 class PatchError(Exception): pass
 
-def run_all():
+def run_all(skip_failing=False):
 	"""run all pending patches"""
 	executed = [p[0] for p in frappe.db.sql("""select patch from `tabPatch Log`""")]
 
 	frappe.flags.final_patches = []
-	for patch in get_all_patches():
-		if patch and (patch not in executed):
+
+	def run_patch(patch):
+		try:
 			if not run_single(patchmodule = patch):
 				log(patch + ': failed: STOPPED')
 				raise PatchError(patch)
+		except Exception:
+			if not skip_failing:
+				raise
+			else:
+				log('Failed to execute patch')
+
+	for patch in get_all_patches():
+		if patch and (patch not in executed):
+			run_patch(patch)
 
 	# patches to be run in the end
 	for patch in frappe.flags.final_patches:
 		patch = patch.replace('finally:', '')
-		if not run_single(patchmodule = patch):
-			log(patch + ': failed: STOPPED')
-			raise PatchError(patch)
+		run_patch(patch)
 
 def get_all_patches():
 	patches = []
@@ -68,7 +76,7 @@ def execute_patch(patchmodule, method=None, methodargs=None):
 	"""execute the patch"""
 	block_user(True)
 	frappe.db.begin()
-
+	start_time = time.time()
 	try:
 		log('Executing {patch} in {site} ({db})'.format(patch=patchmodule or str(methodargs),
 			site=frappe.local.site, db=frappe.db.cur_db_name))
@@ -78,7 +86,7 @@ def execute_patch(patchmodule, method=None, methodargs=None):
 				frappe.flags.final_patches.append(patchmodule)
 			else:
 				if patchmodule.startswith("execute:"):
-					exec patchmodule.split("execute:")[1] in globals()
+					exec(patchmodule.split("execute:")[1],globals())
 				else:
 					frappe.get_attr(patchmodule.split()[0] + ".execute")()
 				update_patch_log(patchmodule)
@@ -91,8 +99,9 @@ def execute_patch(patchmodule, method=None, methodargs=None):
 
 	else:
 		frappe.db.commit()
+		end_time = time.time()
 		block_user(False)
-		log('Success')
+		log('Success: Done in {time}s'.format(time = round(end_time - start_time, 3)))
 
 	return True
 
@@ -110,11 +119,12 @@ def executed(patchmodule):
 	# 	print "Patch %s already executed in %s" % (patchmodule, frappe.db.cur_db_name)
 	return done
 
-def block_user(block):
+def block_user(block, msg=None):
 	"""stop/start execution till patch is run"""
 	frappe.local.flags.in_patch = block
 	frappe.db.begin()
-	msg = "Patches are being executed in the system. Please try again in a few moments."
+	if not msg:
+		msg = "Patches are being executed in the system. Please try again in a few moments."
 	frappe.db.set_global('__session_status', block and 'stop' or None)
 	frappe.db.set_global('__session_status_message', block and msg or None)
 	frappe.db.commit()

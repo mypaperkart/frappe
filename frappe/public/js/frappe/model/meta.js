@@ -8,7 +8,7 @@ frappe.provide('frappe.meta.doctypes');
 frappe.provide("frappe.meta.precision_map");
 
 frappe.get_meta = function(doctype) {
-	return locals["DocType"][doctype];
+	return locals['DocType'] ? locals['DocType'][doctype] : null;
 }
 
 $.extend(frappe.meta, {
@@ -105,16 +105,11 @@ $.extend(frappe.meta, {
 			function(d) { return d.fieldtype=="Link" ? d.options : null; });
 	},
 
-	get_fields_to_check_permissions: function(doctype, name, user_permission_doctypes) {
+	get_fields_to_check_permissions: function(doctype) {
 		var fields = $.map(frappe.meta.get_docfields(doctype, name), function(df) {
-			return (df.fieldtype==="Link" && df.ignore_user_permissions!==1 &&
-				user_permission_doctypes.indexOf(df.options)!==-1) ? df : null;
+			return (df.fieldtype==="Link" && df.ignore_user_permissions!==1) ? df : null;
 		});
-
-		if (user_permission_doctypes.indexOf(doctype)!==-1) {
-			fields = fields.concat({label: "Name", fieldname: name, options: doctype});
-		}
-
+		fields = fields.concat({label: "Name", fieldname: name, options: doctype});
 		return fields;
 	},
 
@@ -138,12 +133,13 @@ $.extend(frappe.meta, {
 	},
 
 	has_field: function(dt, fn) {
-		return frappe.meta.docfield_map[dt][fn];
+		let docfield_map = frappe.meta.docfield_map[dt];
+		return docfield_map && docfield_map[fn];
 	},
 
 	get_table_fields: function(dt) {
 		return $.map(frappe.meta.docfield_list[dt], function(d) {
-			return d.fieldtype==='Table' ? d : null});
+			return frappe.model.table_fields.includes(d.fieldtype) ? d : null});
 	},
 
 	get_doctype_for_field: function(doctype, key) {
@@ -164,16 +160,16 @@ $.extend(frappe.meta, {
 			});
 
 			if(!out) {
-				frappe.msgprint(__('Warning: Unable to find {0} in any table related to {1}', [
-					key, __(doctype)]));
+				// eslint-disable-next-line
+				console.log(__('Warning: Unable to find {0} in any table related to {1}', [key, __(doctype)]));
 			}
 		}
 		return out;
 	},
 
 	get_parentfield: function(parent_dt, child_dt) {
-		var df = (frappe.get_doc("DocType", parent_dt).fields || []).filter(function(d)
-			{ return d.fieldtype==="Table" && d.options===child_dt })
+		var df = (frappe.get_doc("DocType", parent_dt).fields || [])
+			.filter(df => frappe.model.table_fields.includes(df.fieldtype) && df.options===child_dt)
 		if(!df.length)
 			throw "parentfield not found for " + parent_dt + ", " + child_dt;
 		return df[0].fieldname;
@@ -199,12 +195,17 @@ $.extend(frappe.meta, {
 	get_print_formats: function(doctype) {
 		var print_format_list = ["Standard"];
 		var default_print_format = locals.DocType[doctype].default_print_format;
-
+		let enable_raw_printing = frappe.model.get_doc(":Print Settings", "Print Settings").enable_raw_printing;
 		var print_formats = frappe.get_list("Print Format", {doc_type: doctype})
 			.sort(function(a, b) { return (a > b) ? 1 : -1; });
 		$.each(print_formats, function(i, d) {
-			if(!in_list(print_format_list, d.name) && in_list(['Server', 'Client'], d.print_format_type))
+			if (
+				!in_list(print_format_list, d.name)
+				&& d.print_format_type !== 'JS'
+				&& (cint(enable_raw_printing) || !d.raw_printing)
+			) {
 				print_format_list.push(d.name);
+			}
 		});
 
 		if(default_print_format && default_print_format != "Standard") {
@@ -251,7 +252,7 @@ $.extend(frappe.meta, {
 
 	get_field_precision: function(df, doc) {
 		var precision = null;
-		if (df && cint(df.precision)) {
+		if (df && df.precision) {
 			precision = cint(df.precision);
 		} else if(df && df.fieldtype === "Currency") {
 			precision = cint(frappe.defaults.get_default("currency_precision"));
@@ -264,5 +265,5 @@ $.extend(frappe.meta, {
 			precision = cint(frappe.defaults.get_default("float_precision")) || 3;
 		}
 		return precision;
-	},
+	}
 });

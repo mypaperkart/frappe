@@ -9,8 +9,8 @@ def get_data():
 			"items": [
 				{
 					"type": "doctype",
-					"name": "Stripe Settings",
-					"description": _("Stripe payment gateway settings"),
+					"name": "Braintree Settings",
+					"description": _("Braintree payment gateway settings"),
 				},
 				{
 					"type": "doctype",
@@ -22,6 +22,16 @@ def get_data():
 					"name": "Razorpay Settings",
 					"description": _("Razorpay Payment gateway settings"),
 				},
+				{
+					"type": "doctype",
+					"name": "Stripe Settings",
+					"description": _("Stripe payment gateway settings"),
+				},
+				{
+					"type": "doctype",
+					"name": "Paytm Settings",
+					"description": _("Paytm payment gateway settings"),
+				},
 			]
 		},
 		{
@@ -32,6 +42,16 @@ def get_data():
 					"name": "Dropbox Settings",
 					"description": _("Dropbox backup settings"),
 				},
+				{
+					"type": "doctype",
+					"name": "S3 Backup Settings",
+					"description": _("S3 Backup Settings"),
+				},
+				{
+					"type": "doctype",
+					"name": "Google Drive",
+					"description": _("Google Drive Backup."),
+				}
 			]
 		},
 		{
@@ -39,7 +59,7 @@ def get_data():
 			"items": [
 				{
 					"type": "doctype",
-					"name": "Social Login Keys",
+					"name": "Social Login Key",
 					"description": _("Enter keys to enable login via Facebook, Google, GitHub."),
 				},
 				{
@@ -60,18 +80,43 @@ def get_data():
 			]
 		},
 		{
-			"label": _("External Documents"),
+			"label": _("Webhook"),
 			"items": [
 				{
 					"type": "doctype",
-					"name": "GSuite Settings",
-					"description": _("Enter keys to enable integration with Google GSuite"),
+					"name": "Webhook",
+					"description": _("Webhooks calling API requests into web apps"),
 				},
 				{
 					"type": "doctype",
-					"name": "GSuite Templates",
-					"description": _("Google GSuite Templates to integration with DocTypes"),
+					"name": "Slack Webhook URL",
+					"description": _("Slack Webhooks for internal integration"),
 				},
+			]
+		},
+		{
+			"label": _("Google Services"),
+			"items": [
+				{
+					"type": "doctype",
+					"name": "Google Settings",
+					"description": _("Google API Settings."),
+				},
+				{
+					"type": "doctype",
+					"name": "Google Contacts",
+					"description": _("Google Contacts Integration."),
+				},
+				{
+					"type": "doctype",
+					"name": "Google Calendar",
+					"description": _("Google Calendar Integration."),
+				},
+				{
+					"type": "doctype",
+					"name": "Google Drive",
+					"description": _("Google Drive Integration."),
+				}
 			]
 		}
 	]

@@ -6,6 +6,10 @@ import frappe
 import frappe.defaults
 import datetime
 from frappe.utils import get_datetime
+from frappe.utils import add_to_date, getdate
+from frappe.utils.data import get_last_day_of_week
+from frappe.desk.doctype.dashboard_chart.dashboard_chart import get_period_ending
+from six import string_types
 
 # global values -- used for caching
 dateformats = {
@@ -29,7 +33,7 @@ def user_to_str(date, date_format=None):
 	try:
 		return datetime.datetime.strptime(date,
 			dateformats[date_format]).strftime('%Y-%m-%d')
-	except ValueError as e:
+	except ValueError:
 		raise ValueError("Date %s must be in format %s" % (date, date_format))
 
 def parse_date(date):
@@ -41,7 +45,7 @@ def parse_date(date):
 		date = date.split(" ")[0]
 
 	# why the sorting? checking should be done in a predictable order
-	check_formats = [None] + sorted(dateformats.keys(),
+	check_formats = [None] + sorted(list(dateformats),
 		reverse=not get_user_date_format().startswith("dd"))
 
 	for f in check_formats:
@@ -49,7 +53,7 @@ def parse_date(date):
 			parsed_date = user_to_str(date, f)
 			if parsed_date:
 				break
-		except ValueError as e:
+		except ValueError:
 			pass
 
 	if not parsed_date:
@@ -68,7 +72,34 @@ def get_user_date_format():
 def datetime_in_user_format(date_time):
 	if not date_time:
 		return ""
-	if isinstance(date_time, basestring):
+	if isinstance(date_time, string_types):
 		date_time = get_datetime(date_time)
 	from frappe.utils import formatdate
 	return formatdate(date_time.date()) + " " + date_time.strftime("%H:%M")
+
+def get_dates_from_timegrain(from_date, to_date, timegrain="Daily"):
+	from_date = getdate(from_date)
+	to_date = getdate(to_date)
+
+	days = months = years = 0
+	if "Daily" == timegrain:
+		days = 1
+	elif "Weekly" == timegrain:
+		days = 7
+	elif "Monthly" == timegrain:
+		months = 1
+	elif "Quarterly" == timegrain:
+		months = 3
+
+	if "Weekly" == timegrain:
+		dates = [get_last_day_of_week(from_date)]
+	else:
+		dates = [get_period_ending(from_date, timegrain)]
+
+	while getdate(dates[-1]) < getdate(to_date):
+		if "Weekly" == timegrain:
+			date = get_last_day_of_week(add_to_date(dates[-1], years=years, months=months, days=days))
+		else:
+			date = get_period_ending(add_to_date(dates[-1], years=years, months=months, days=days), timegrain)
+		dates.append(date)
+	return dates

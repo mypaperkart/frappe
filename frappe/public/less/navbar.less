@@ -1,19 +1,46 @@
 @import "variables.less";
 @import "mixins.less";
 
-.navbar .dropdown-toggle {
-	padding-top: 8px;
-	padding-bottom: 8px;
-}
-
 .navbar-fixed-top {
 	left: 0px;
 	right: 0px;
 }
 
-.navbar a {
-	font-size: 12px;
-	font-weight: bold;
+.navbar {
+	a {
+		font-size: 12px;
+		font-weight: bold;
+	}
+
+	.dropdown-toggle {
+		padding-top: 8px;
+		padding-bottom: 8px;
+	}
+
+	// instead of changes within BS3 itself
+	.nav > li > a {
+		padding: 8px 10px;
+	}
+
+	.navbar-search-icon {
+		color: @navbar-default-color;
+		font-size: inherit;
+		position: relative;
+		right: 24px;
+		top: 1px;
+	}
+
+	.badge {
+		font-weight: normal;
+	}
+
+	.navbar-home {
+		img {
+		  width: 24px;
+		  margin-right: 0px;
+		  margin-top: -3px;
+		}
+	}
 }
 
 .navbar-icon-home {
@@ -55,6 +82,13 @@
 		padding: 8px 0 !important;
 		margin-left: 0 !important;
 	}
+
+	.help-icon {
+		margin-top: 1px;
+		padding: 10px 5px;
+		background-color: #fafbfc;
+		font-weight: 100;
+	}
 }
 
 @media (max-width: 767px) {
@@ -93,6 +127,11 @@
 	.dropdown-menu {
 		margin-top: 0;
 	}
+}
+
+.dropdown-notification {
+	max-height: 480px;
+	overflow-y: auto;
 }
 
 .dropdown-help .dropdown-menu {
@@ -143,6 +182,9 @@
 			padding: 12px;
 		}
 	}
+	.dropdown-help {
+		display: none !important;
+	}
 }
 
 .navbar-new-comments {
@@ -161,7 +203,8 @@
 }
 
 .navbar-form .awesomplete {
-	width: 300px;
+	margin-left: -15px;
+	width: 370px;
 
 	@media (max-width: @screen-md) {
 		width: 280px;
@@ -175,18 +218,6 @@
 #navbar-search {
 	width: 100%;
 	background-color: rgba(255, 255, 255, 0.9);
-}
-
-.navbar .navbar-search-icon {
-	color: @navbar-default-color;
-	font-size: inherit;
-	position: relative;
-	right: 24px;
-	top: 1px;
-}
-
-.navbar .badge {
-	font-weight: normal;
 }
 
 #navbar-search-results {
@@ -218,12 +249,13 @@
 
 #navbar-breadcrumbs > li > a {
 	padding: 6px 15px 10px 0px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 170px;
 
 	@media (min-width:991px) and (max-width: 1199px) {
-		max-width: 143px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		max-width: 120px;
 	}
 }
 
