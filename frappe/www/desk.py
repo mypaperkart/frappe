@@ -1,74 +1,96 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
-# MIT License. See license.txt
+# License: MIT. See LICENSE
+import os
 
-from __future__ import unicode_literals
-
-no_sitemap = 1
 no_cache = 1
-base_template_path = "templates/www/desk.html"
 
-import os, re
+import json
+import re
+from urllib.parse import urlencode
+
 import frappe
-from frappe import _
 import frappe.sessions
+from frappe import _
+from frappe.utils.jinja_globals import is_rtl
+
+SCRIPT_TAG_PATTERN = re.compile(r"\<script[^<]*\</script\>")
+CLOSING_SCRIPT_TAG_PATTERN = re.compile(r"</script\>")
+
+
+def get_session_boot_failed_error(e: Exception) -> "frappe.SessionBootFailed":
+	"""Build the error shown when the desk fails to boot.
+
+	The usual cause is a site whose database is behind the code, so say that plainly and give
+	the command that fixes it instead of a bare traceback."""
+	error = frappe.SessionBootFailed()
+
+	if is_schema_out_of_date(e):
+		error.title = _("This site needs a migration")
+		error.message = _("Don't panic. Run this command and reload the page:")
+		error.command = f"bench --site {frappe.local.site} migrate"
+
+	return error
+
+
+def is_schema_out_of_date(e: Exception) -> bool:
+	"""True if this failure, or anything that caused it, was a missing table or column."""
+	seen = set()
+
+	while e is not None and id(e) not in seen:
+		seen.add(id(e))
+
+		if frappe.db.is_missing_table_or_column(e):
+			return True
+
+		e = e.__cause__ or e.__context__
+
+	return False
+
 
 def get_context(context):
-	if (frappe.session.user == "Guest" or
-		frappe.db.get_value("User", frappe.session.user, "user_type")=="Website User"):
+	if frappe.session.user == "Guest":
+		frappe.response["status_code"] = 403
+		frappe.msgprint(_("Log in to access this page."))
+		frappe.redirect(f"/login?{urlencode({'redirect-to': frappe.request.path})}")
+
+	elif frappe.session.data.user_type == "Website User":
 		frappe.throw(_("You are not permitted to access this page."), frappe.PermissionError)
 
-	hooks = frappe.get_hooks()
 	try:
 		boot = frappe.sessions.get()
 	except Exception as e:
-		boot = frappe._dict(status='failed', error = str(e))
-		print frappe.get_traceback()
+		raise get_session_boot_failed_error(e) from e
 
 	# this needs commit
 	csrf_token = frappe.sessions.get_csrf_token()
 
-	frappe.db.commit()
+	hooks = frappe.get_hooks()
+	app_include_js = hooks.get("app_include_js", []) + frappe.conf.get("app_include_js", [])
+	app_include_css = hooks.get("app_include_css", []) + frappe.conf.get("app_include_css", [])
+	app_include_icons = hooks.get("app_include_icons", [])
 
-	boot_json = frappe.as_json(boot)
+	if frappe.get_system_settings("enable_telemetry") and os.getenv("FRAPPE_SENTRY_DSN"):
+		app_include_js.append("sentry.bundle.js")
 
-	# remove script tags from boot
-	boot_json = re.sub("\<script\>[^<]*\</script\>", "", boot_json)
+	context.update(
+		{
+			"no_cache": 1,
+			"build_version": frappe.utils.get_build_version(),
+			"app_include_js": app_include_js,
+			"app_include_css": app_include_css,
+			"app_include_icons": app_include_icons,
+			"layout_direction": "rtl" if is_rtl() else "ltr",
+			"lang": frappe.local.lang,
+			"sounds": hooks["sounds"],
+			"boot": boot,
+			"desk_theme": boot.get("desk_theme") or "Light",
+			"csrf_token": csrf_token,
+			"google_analytics_id": frappe.conf.get("google_analytics_id"),
+			"google_analytics_anonymize_ip": frappe.conf.get("google_analytics_anonymize_ip"),
+			"app_name": (
+				frappe.get_website_settings("app_name") or frappe.get_system_settings("app_name") or "Frappe"
+			),
+		}
+	)
 
-	return {
-		"build_version": get_build_version(),
-		"include_js": hooks["app_include_js"],
-		"include_css": hooks["app_include_css"],
-		"sounds": hooks["sounds"],
-		"boot": boot if context.get("for_mobile") else boot_json,
-		"csrf_token": csrf_token,
-		"background_image": (boot.status != 'failed' and
-			(boot.user.background_image or boot.default_background_image) or None),
-		"google_analytics_id": frappe.conf.get("google_analytics_id"),
-		"mixpanel_id": frappe.conf.get("mixpanel_id")
-	}
-
-@frappe.whitelist()
-def get_desk_assets(build_version):
-	"""Get desk assets to be loaded for mobile app"""
-	data = get_context({"for_mobile": True})
-	assets = [{"type": "js", "data": ""}, {"type": "css", "data": ""}]
-
-	if build_version != data["build_version"]:
-		# new build, send assets
-		for path in data["include_js"]:
-			with open(os.path.join(frappe.local.sites_path, path) ,"r") as f:
-				assets[0]["data"] = assets[0]["data"] + "\n" + unicode(f.read(), "utf-8")
-
-		for path in data["include_css"]:
-			with open(os.path.join(frappe.local.sites_path, path) ,"r") as f:
-				assets[1]["data"] = assets[1]["data"] + "\n" + unicode(f.read(), "utf-8")
-
-	return {
-		"build_version": data["build_version"],
-		"boot": data["boot"],
-		"assets": assets
-	}
-
-def get_build_version():
-	return str(os.path.getmtime(os.path.join(frappe.local.sites_path, "assets", "js",
-			"desk.min.js")))
+	return context

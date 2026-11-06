@@ -1,32 +1,97 @@
-# Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
-# MIT License. See license.txt
+# Copyright (c) 2022, Frappe Technologies Pvt. Ltd. and Contributors
+# License: MIT. See LICENSE
 
-from __future__ import unicode_literals
+from urllib import robotparser
+from urllib.parse import quote
 
-import urllib
 import frappe
-from frappe.utils import get_request_site_address, get_datetime, nowdate
-from frappe.website.router import get_pages, get_all_page_context_from_doctypes
+from frappe.model.document import get_controller
+from frappe.utils import get_url, nowdate
+from frappe.utils.caching import redis_cache
+from frappe.website.router import get_doctypes_with_web_view, get_pages
 
 no_cache = 1
-no_sitemap = 1
-base_template_path = "templates/www/sitemap.xml"
+base_template_path = "www/sitemap.xml"
+
 
 def get_context(context):
 	"""generate the sitemap XML"""
-	host = get_request_site_address()
-	links = []
-	for route, page in get_pages().iteritems():
-		if not page.no_sitemap:
-			links.append({
-				"loc": urllib.basejoin(host, urllib.quote(page.name.encode("utf-8"))),
-				"lastmod": nowdate()
-			})
+	disabled_controllers = {
+		controller
+		for controller, settings in {
+			"frappe.www.about": "About Us Settings",
+			"frappe.www.contact": "Contact Us Settings",
+		}.items()
+		if frappe.get_single_value(settings, "is_disabled")
+	}
 
-	for route, data in get_all_page_context_from_doctypes().iteritems():
-		links.append({
-			"loc": urllib.basejoin(host, urllib.quote((route or "").encode("utf-8"))),
-			"lastmod": get_datetime(data.get("modified")).strftime("%Y-%m-%d")
-		})
+	links = [
+		{"loc": get_url(quote(page.name.encode("utf-8"))), "lastmod": nowdate()}
+		for route, page in get_pages().items()
+		if page.sitemap and page.controller not in disabled_controllers
+	]
 
-	return {"links":links}
+	links.extend(
+		{
+			"loc": get_url(quote((route or "").encode("utf-8"))),
+			"lastmod": f"{data['modified']:%Y-%m-%d}",
+		}
+		for route, data in get_public_pages_from_doctypes().items()
+	)
+
+	return {"links": links}
+
+
+@redis_cache(ttl=6 * 60 * 60)
+def get_public_pages_from_doctypes():
+	"""Return pages from doctypes that are publicly accessible."""
+
+	routes = {}
+	doctypes_with_web_view = get_doctypes_with_web_view()
+
+	robot_parser_instance = None
+	if robots_txt := frappe.get_single_value("Website Settings", "robots_txt"):
+		robot_parser_instance = robotparser.RobotFileParser()
+		robot_parser_instance.parse(robots_txt.splitlines())
+
+	for doctype in doctypes_with_web_view:
+		controller = get_controller(doctype)
+		meta = frappe.get_meta(doctype)
+
+		if not meta.allow_guest_to_view:
+			continue
+
+		condition_field = meta.is_published_field or controller.website.condition_field
+
+		if not condition_field:
+			continue
+
+		try:
+			res = frappe.get_all(
+				doctype,
+				fields=["route", "name", "modified"],
+				filters={condition_field: True},
+			)
+		except Exception as e:
+			if not frappe.db.is_missing_column(e):
+				raise e
+
+		for r in res:
+			if not r.route or is_dynamic_route(r.route):
+				continue
+
+			if robot_parser_instance and not robot_parser_instance.can_fetch("*", f"/{r.route}"):
+				continue
+
+			routes[r.route] = {
+				"doctype": doctype,
+				"name": r.name,
+				"modified": r.modified,
+			}
+
+	return routes
+
+
+def is_dynamic_route(route: str) -> bool:
+	"""Check if route has dynamic segments like /project/<name> or /blog/:name."""
+	return "<" in route or any(part.startswith(":") for part in route.split("/"))

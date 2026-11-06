@@ -1,89 +1,181 @@
-// Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
-// MIT License. See license.txt
-
-// update parent select
-
-// frappe.ui.form.on("Website Settings", "refresh", function(frm) {
-// 	if(user==="Administrator") {
-// 		frm.add_custom_button("Export to Fixtures", function() {
-// 			frappe.prompt({fieldname:"app", fieldtype:"Data", label:__("App Name"), reqd:1}, function(data) {
-// 				frappe.call({
-// 					method: "frappe.core.page.data_import_tool.data_import_tool.export_fixture",
-// 					args: {
-// 						app: data.app,
-// 						doctype:"Website Settings"
-// 					},
-// 					callback: function(r) {
-// 						if(!r.exc) {	frappe.msgprint(__("Exported")); }
-// 					}
-// 				})
-// 			})
-// 		}, null, "btn-default")
-// 	}
-// })
-
-$.extend(cur_frm.cscript, {
-	refresh: function(doc) {
-	},
-	onload_post_render: function(doc) {
-		this.set_parent_label_options();
+frappe.ui.form.on("Website Settings", {
+	setup(frm) {
+		frm.set_query("navbar_template", () => ({
+			filters: {
+				type: "Navbar",
+			},
+		}));
+		frm.set_query("footer_template", () => ({
+			filters: {
+				type: "Footer",
+			},
+		}));
 	},
 
-	label: function(doc, cdt, cdn) {
-		var item = frappe.get_doc(cdt, cdn);
-		if(item.parentfield === "top_bar_items") {
-			this.set_parent_label_options();
+	refresh: function (frm) {
+		frm.add_custom_button(__("View Website"), () => {
+			window.open("/", "_blank");
+		});
+
+		// Check if templates have fields and show/hide edit button
+		frm.events.check_template_has_fields(frm, "navbar_template");
+		frm.events.check_template_has_fields(frm, "footer_template");
+	},
+
+	set_banner_from_image: function (frm) {
+		if (!frm.doc.banner_image) {
+			frappe.msgprint(__("Select a Brand Image first."));
 		}
-		else if(item.parentfield === "footer_items") {
-			this.set_parent_label_options_footer();
+		frm.set_value("brand_html", "<img src='" + frm.doc.banner_image + "'>");
+	},
+
+	onload_post_render: function (frm) {
+		frm.trigger("set_parent_label_options");
+		frm.trigger("set_parent_label_options_footer");
+	},
+
+	set_parent_label_options: function (frm) {
+		frm.fields_dict.top_bar_items.grid.update_docfield_property(
+			"parent_label",
+			"options",
+			frm.events.get_parent_options(frm, "top_bar_items")
+		);
+	},
+
+	set_parent_label_options_footer: function (frm) {
+		frm.fields_dict.footer_items.grid.update_docfield_property(
+			"parent_label",
+			"options",
+			frm.events.get_parent_options(frm, "footer_items")
+		);
+	},
+
+	authorize_api_indexing_access: function (frm) {
+		frappe.call({
+			method: "frappe.website.doctype.website_settings.google_indexing.authorize_access",
+			args: {
+				reauthorize: frm.doc.indexing_authorization_code ? 1 : 0,
+			},
+			callback: function (r) {
+				if (!r.exc) {
+					frm.save();
+					window.open(r.message.url);
+				}
+			},
+		});
+	},
+
+	enable_view_tracking: function (frm) {
+		frappe.boot.website_tracking_enabled = frm.doc.enable_view_tracking;
+	},
+
+	set_parent_options: function (frm, doctype, name) {
+		var item = frappe.get_doc(doctype, name);
+		if (item.parentfield === "top_bar_items") {
+			frm.trigger("set_parent_label_options");
+		} else if (item.parentfield === "footer_items") {
+			frm.trigger("set_parent_label_options_footer");
 		}
 	},
 
-	parent_label: function(doc, cdt, cdn) {
-		this.label(doc, cdt, cdn);
-	},
-
-	url: function(doc, cdt, cdn) {
-		this.label(doc, cdt, cdn);
-	},
-
-	set_parent_label_options: function() {
-		frappe.meta.get_docfield("Top Bar Item", "parent_label", cur_frm.docname).options =
-			this.get_parent_options("top_bar_items");
-
-		if($(cur_frm.fields_dict.top_bar_items.grid.wrapper).find(".grid-row-open")) {
-			cur_frm.fields_dict.top_bar_items.grid.refresh();
-		}
-	},
-
-	set_parent_label_options_footer: function() {
-		frappe.meta.get_docfield("Top Bar Item", "parent_label", cur_frm.docname).options =
-			this.get_parent_options("footer_items");
-
-		if($(cur_frm.fields_dict.footer_items.grid.wrapper).find(".grid-row-open")) {
-			cur_frm.fields_dict.footer_items.grid.refresh();
-		}
-	},
-
-	// get labels of parent items
-	get_parent_options: function(table_field) {
-		var items = cur_frm.doc[table_field] || [];
-		var main_items = [''];
-		for(var i in items) {
+	get_parent_options: function (frm, table_field) {
+		var items = frm.doc[table_field] || [];
+		var main_items = [""];
+		for (var i in items) {
 			var d = items[i];
-			if(!d.parent_label && !d.url && d.label) {
+			if (!d.url && d.label) {
 				main_items.push(d.label);
 			}
 		}
-		return main_items.join('\n');
-	}
+		return main_items.join("\n");
+	},
+
+	edit_navbar_template_values(frm) {
+		frm.events.edit_template_values(frm, "navbar_template");
+	},
+
+	edit_footer_template_values(frm) {
+		frm.events.edit_template_values(frm, "footer_template");
+	},
+
+	edit_template_values(frm, template_field) {
+		let values_field = template_field + "_values";
+		let template = frm.doc[template_field];
+		if (!template) {
+			frappe.show_alert(__("Please select {0}", [frm.get_docfield(template_field).label]));
+			return;
+		}
+
+		let values = JSON.parse(frm.doc[values_field] || "{}");
+		open_web_template_values_editor(template, values).then((new_values) => {
+			frm.set_value(values_field, JSON.stringify(new_values));
+		});
+	},
+
+	check_template_has_fields(frm, template_field) {
+		let template = frm.doc[template_field];
+		let button_field = "edit_" + template_field + "_values";
+
+		if (!template || template === "Standard Navbar" || template === "Standard Footer") {
+			frm.toggle_display(button_field, false);
+			return;
+		}
+
+		frappe.model.with_doc("Web Template", template, () => {
+			let doc = frappe.model.get_doc("Web Template", template);
+			let has_fields = doc.fields && doc.fields.length > 0;
+			frm.toggle_display(button_field, has_fields);
+		});
+	},
+
+	navbar_template(frm) {
+		frm.events.check_template_has_fields(frm, "navbar_template");
+	},
+
+	footer_template(frm) {
+		frm.events.check_template_has_fields(frm, "footer_template");
+	},
 });
 
-cur_frm.cscript.set_banner_from_image = function(doc) {
-	if(!doc.banner_image) {
-		frappe.msgprint(__("Select a Brand Image first."));
-	}
-	var src = doc.banner_image;
-	cur_frm.set_value("brand_html", "<img src='"+ src
-		+"' style='max-width: 150px;'>");
-}
+frappe.ui.form.on("Top Bar Item", {
+	top_bar_items_delete(frm) {
+		frm.events.set_parent_label_options(frm);
+	},
+
+	footer_items_add(frm, cdt, cdn) {
+		frappe.model.set_value(cdt, cdn, "right", 0);
+	},
+
+	footer_items_delete(frm) {
+		frm.events.set_parent_label_options_footer(frm);
+	},
+
+	parent_label: function (frm, doctype, name) {
+		frm.events.set_parent_options(frm, doctype, name);
+	},
+
+	url: function (frm, doctype, name) {
+		frm.events.set_parent_options(frm, doctype, name);
+	},
+
+	label: function (frm, doctype, name) {
+		frm.events.set_parent_options(frm, doctype, name);
+	},
+});
+
+frappe.tour["Website Settings"] = [
+	{
+		fieldname: "enable_view_tracking",
+		title: __("Enable Tracking Page Views"),
+		description: __(
+			"Checking this will enable tracking page views for blogs, web pages, etc."
+		),
+	},
+	{
+		fieldname: "disable_signup",
+		title: __("Disable Signup for your site"),
+		description: __(
+			"Check this if you don't want users to sign up for an account on your site. Users won't get desk access unless you explicitly provide it."
+		),
+	},
+];

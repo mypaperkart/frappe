@@ -1,38 +1,51 @@
-# Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
-# MIT License. See license.txt
+# Copyright (c) 2022, Frappe Technologies Pvt. Ltd. and Contributors
+# License: MIT. See LICENSE
 
-from __future__ import unicode_literals
+from email.utils import formataddr
+from typing import TYPE_CHECKING
 
-import frappe, json
-from frappe import _dict
+import frappe
 import frappe.share
-from frappe.utils import cint
-from frappe.boot import get_allowed_reports
-from frappe.permissions import get_roles, get_valid_perms
+from frappe import _dict
+from frappe.app_state import get_disabled_modules
+from frappe.core.doctype.domain_settings.domain_settings import get_active_modules
+from frappe.desk.desk_views import DeskViews
+from frappe.permissions import AUTOMATIC_ROLES, get_rights, get_roles, get_valid_perms
+from frappe.query_builder import DocType, Order
+from frappe.query_builder.functions import Concat_ws
+from frappe.utils.translations import _
+
+if TYPE_CHECKING:
+	from frappe.core.doctype.user.user import User
+
 
 class UserPermissions:
 	"""
 	A user permission object can be accessed as `frappe.get_user()`
 	"""
-	def __init__(self, name=''):
+
+	def __init__(self, name=""):
 		self.defaults = None
-		self.name = name or frappe.session.get('user')
+		self.name = name or frappe.session.get("user")
 		self.roles = []
 
 		self.all_read = []
 		self.can_create = []
+		self.can_select = []
 		self.can_read = []
 		self.can_write = []
+		self.can_submit = []
 		self.can_cancel = []
 		self.can_delete = []
 		self.can_search = []
 		self.can_get_report = []
 		self.can_import = []
 		self.can_export = []
+		self.can_export_owner_only = []
 		self.can_print = []
 		self.can_email = []
-		self.can_set_user_permissions = []
 		self.allow_modules = []
+		self.permitted_modules = []
 		self.in_create = []
 		self.setup_user()
 
@@ -45,12 +58,13 @@ class UserPermissions:
 				pass
 			except Exception as e:
 				# install boo-boo
-				if e.args[0] != 1146: raise
+				if not frappe.db.is_table_missing(e):
+					raise
 
 			return user
 
-		if not frappe.flags.in_install_db and not frappe.flags.in_test:
-			user_doc = frappe.cache().hget("user_doc", self.name, get_user_doc)
+		if not frappe.flags.in_install_db and not frappe.in_test:
+			user_doc = frappe.cache.hget("user_doc", self.name, get_user_doc)
 			if user_doc:
 				self.doc = frappe.get_doc(user_doc)
 
@@ -62,86 +76,128 @@ class UserPermissions:
 
 	def build_doctype_map(self):
 		"""build map of special doctype properties"""
-
 		self.doctype_map = {}
-		for r in frappe.db.sql("""select name, in_create, issingle, istable,
-			read_only, module from tabDocType""", as_dict=1):
-			self.doctype_map[r['name']] = r
+
+		active_domains = frappe.get_active_domains()
+		disabled_modules = get_disabled_modules()
+		all_doctypes = frappe.get_all(
+			"DocType",
+			fields=[
+				"name",
+				"in_create",
+				"module",
+				"istable",
+				"issingle",
+				"read_only",
+				"restrict_to_domain",
+			],
+		)
+
+		for dt in all_doctypes:
+			if dt.module in disabled_modules:
+				continue
+
+			if not dt.restrict_to_domain or (dt.restrict_to_domain in active_domains):
+				self.doctype_map[dt["name"]] = dt
 
 	def build_perm_map(self):
 		"""build map of permissions at level 0"""
 		self.perm_map = {}
 		for r in get_valid_perms():
-			dt = r['parent']
+			dt = r["parent"]
 
-			if not dt in  self.perm_map:
+			if dt not in self.perm_map:
 				self.perm_map[dt] = {}
 
-			for k in frappe.permissions.rights:
+			rights = get_rights(dt)
+			for k in rights:
 				if not self.perm_map[dt].get(k):
 					self.perm_map[dt][k] = r.get(k)
+			if r.get("export") and not r.get("if_owner"):
+				self.perm_map[dt]["export_non_owner"] = True
 
 	def build_permissions(self):
 		"""build lists of what the user can read / write / create
 		quirks:
-			read_only => Not in Search
-			in_create => Not in create
+		        read_only => Not in Search
+		        in_create => Not in create
 		"""
 		self.build_doctype_map()
 		self.build_perm_map()
 		user_shared = frappe.share.get_shared_doctypes()
 		no_list_view_link = []
-
+		active_modules = get_active_modules() or []
 		for dt in self.doctype_map:
 			dtp = self.doctype_map[dt]
+
 			p = self.perm_map.get(dt, {})
 
 			if not p.get("read") and (dt in user_shared):
 				p["read"] = 1
 
-			if not dtp.get('istable'):
-				if p.get('create') and not dtp.get('issingle'):
-					if dtp.get('in_create'):
+			if p.get("select"):
+				self.can_select.append(dt)
+
+			if not dtp.get("istable"):
+				if p.get("create") and not dtp.get("issingle"):
+					if dtp.get("in_create"):
 						self.in_create.append(dt)
 					else:
 						self.can_create.append(dt)
-				elif p.get('write'):
+				elif p.get("write"):
 					self.can_write.append(dt)
-				elif p.get('read'):
-					if dtp.get('read_only'):
+				elif p.get("read"):
+					if dtp.get("read_only"):
 						# read_only = "User Cannot Search"
 						self.all_read.append(dt)
 						no_list_view_link.append(dt)
 					else:
 						self.can_read.append(dt)
+						if dtp["module"] not in self.permitted_modules:
+							self.permitted_modules.append(dtp["module"])
+			if p.get("submit"):
+				self.can_submit.append(dt)
 
-			if p.get('cancel'):
+			if p.get("cancel"):
 				self.can_cancel.append(dt)
 
-			if p.get('delete'):
+			if p.get("delete"):
 				self.can_delete.append(dt)
 
-			if (p.get('read') or p.get('write') or p.get('create')):
-				if p.get('report'):
+			if p.get("read") or p.get("write") or p.get("create"):
+				if p.get("report"):
 					self.can_get_report.append(dt)
-				for key in ("import", "export", "print", "email", "set_user_permissions"):
+				for key in ("import", "print", "email"):
 					if p.get(key):
 						getattr(self, "can_" + key).append(dt)
 
-				if not dtp.get('istable'):
-					if not dtp.get('issingle') and not dtp.get('read_only'):
+				if not dtp.get("istable"):
+					if frappe.session.user == "Administrator":
 						self.can_search.append(dt)
-					if not dtp.get('module') in self.allow_modules:
-						self.allow_modules.append(dtp.get('module'))
+					elif not dtp.get("issingle") and not dtp.get("read_only"):
+						self.can_search.append(dt)
+					if dtp.get("module") not in self.allow_modules:
+						if active_modules and dtp.get("module") not in active_modules:
+							pass
+						else:
+							self.allow_modules.append(dtp.get("module"))
+
+				if p.get("export"):
+					self.can_export.append(dt)
+					if not p.get("export_non_owner"):
+						self.can_export_owner_only.append(dt)
 
 		self.can_write += self.can_create
 		self.can_write += self.in_create
 		self.can_read += self.can_write
 
-		self.shared = frappe.db.sql_list("""select distinct share_doctype from `tabDocShare`
-			where `user`=%s and `read`=1""", self.name)
+		self.shared = frappe.get_all(
+			"DocShare",
+			{"user": self.name, "read": 1},
+			distinct=True,
+			pluck="share_doctype",
+		)
 		self.can_read = list(set(self.can_read + self.shared))
-
 		self.all_read += self.can_read
 
 		for dt in no_list_view_link:
@@ -149,32 +205,19 @@ class UserPermissions:
 				self.can_read.remove(dt)
 
 		if "System Manager" in self.get_roles():
-			self.can_import = filter(lambda d: d in self.can_create,
-				frappe.db.sql_list("""select name from `tabDocType` where allow_import = 1"""))
+			self.can_export_owner_only = []
+			self.can_import += frappe.get_all("DocType", {"allow_import": 1}, pluck="name")
+			self.can_import += frappe.get_all(
+				"Property Setter",
+				pluck="doc_type",
+				filters={"property": "allow_import", "value": "1"},
+			)
 
 	def get_defaults(self):
 		import frappe.defaults
+
 		self.defaults = frappe.defaults.get_defaults(self.name)
 		return self.defaults
-
-	# update recent documents
-	def update_recent(self, dt, dn):
-		rdl = frappe.cache().hget("user_recent", self.name) or []
-		new_rd = [dt, dn]
-
-		# clear if exists
-		for i in range(len(rdl)):
-			rd = rdl[i]
-			if rd==new_rd:
-				del rdl[i]
-				break
-
-		if len(rdl) > 19:
-			rdl = rdl[:19]
-
-		rdl = [new_rd] + rdl
-
-		frappe.cache().hset("user_recent", self.name, rdl)
 
 	def _get(self, key):
 		if not self.can_read:
@@ -187,152 +230,278 @@ class UserPermissions:
 			self.build_permissions()
 		return self.can_read
 
+	def load_user_default_workspace(self):
+		"""
+		Note: ideally it should leverage existing `load_user` routine, through some specific flag aka `workspace_only` (aka ability to query only a specific attribute as required).
+		"""
+		user_data = frappe.db.get_value("User", self.name, ["default_workspace"], as_dict=True)
+		if user_data is None:
+			# NOTE: `user_data` shouldn't be None, as both "User" (as table) and "self.name" (as column) are expected to be Present always ??
+			return None
+
+		if user_data.get("default_workspace"):
+			try:
+				workspace = frappe.get_cached_doc("Workspace", user_data.default_workspace)
+				user_data.default_workspace = {
+					"name": workspace.name,
+					"public": workspace.public,
+					"title": workspace.title,
+				}
+			except frappe.DoesNotExistError:
+				user_data.default_workspace = None
+		return user_data.default_workspace
+
 	def load_user(self):
-		d = frappe.db.sql("""select email, first_name, last_name, creation,
-			email_signature, user_type, language, background_image, background_style, mute_sounds
-			from tabUser where name = %s""", (self.name,), as_dict=1)[0]
+		d = frappe.db.get_value(
+			"User",
+			self.name,
+			[
+				"creation",
+				"desk_theme",
+				"code_editor_type",
+				"document_follow_notify",
+				"email",
+				"email_signature",
+				"first_name",
+				"language",
+				"last_name",
+				"mute_sounds",
+				"show_absolute_datetime_in_timeline",
+				"send_me_a_copy",
+				"send_read_receipt",
+				"user_type",
+				"onboarding_status",
+				"default_workspace",
+			],
+			as_dict=True,
+		)
 
 		if not self.can_read:
 			self.build_permissions()
 
-		d.name = self.name
-		d.recent = json.dumps(frappe.cache().hget("user_recent", self.name) or [])
+		if d.get("default_workspace"):
+			try:
+				workspace = frappe.get_cached_doc("Workspace", d.default_workspace)
+				d.default_workspace = {
+					"name": workspace.name,
+					"public": workspace.public,
+					"title": workspace.title,
+				}
+			except frappe.DoesNotExistError:
+				d.default_workspace = None
 
+		d.name = self.name
+		d.onboarding_status = frappe.parse_json(d.onboarding_status)
 		d.roles = self.get_roles()
 		d.defaults = self.get_defaults()
-
-		for key in ("can_create", "can_write", "can_read", "can_cancel", "can_delete",
-			"can_get_report", "allow_modules", "all_read", "can_search",
-			"in_create", "can_export", "can_import", "can_print", "can_email",
-			"can_set_user_permissions"):
+		for key in (
+			"can_select",
+			"can_create",
+			"can_write",
+			"can_read",
+			"can_submit",
+			"can_cancel",
+			"can_delete",
+			"can_get_report",
+			"allow_modules",
+			"all_read",
+			"can_search",
+			"in_create",
+			"can_export",
+			"can_export_owner_only",
+			"can_import",
+			"can_print",
+			"can_email",
+			"permitted_modules",
+		):
 			d[key] = list(set(getattr(self, key)))
 
-		d.all_reports = self.get_all_reports()
+		# not `all_reports`: `DeskViews` already puts the identical dict on `bootinfo` as
+		# `allowed_reports`, and shipping it twice cost ~47 KB of every boot payload.
 		return d
 
 	def get_all_reports(self):
-		return get_allowed_reports()
+		return DeskViews.get_allowed_reports()
 
-def get_user_fullname(user):
-	fullname = frappe.db.sql("SELECT CONCAT_WS(' ', first_name, last_name) FROM `tabUser` WHERE name=%s", (user,))
-	return fullname and fullname[0][0] or ''
 
-def get_fullname_and_avatar(user):
-	first_name, last_name, avatar, name = frappe.db.get_value("User",
-		user, ["first_name", "last_name", "user_image", "name"])
-	return _dict({
-		"fullname": " ".join(filter(None, [first_name, last_name])),
-		"avatar": avatar,
-		"name": name
-	})
+def get_user_fullname(user: str) -> str:
+	user_doctype = DocType("User")
+	return (
+		frappe.get_value(
+			user_doctype,
+			filters={"name": user},
+			fieldname=Concat_ws(" ", user_doctype.first_name, user_doctype.last_name),
+		)
+		or ""
+	)
 
-def get_system_managers(only_name=False):
-	"""returns all system manager's user details"""
-	import email.utils
-	from frappe.core.doctype.user.user import STANDARD_USERS
-	system_managers = frappe.db.sql("""select distinct name,
-		concat_ws(" ", if(first_name="", null, first_name), if(last_name="", null, last_name))
-		as fullname from tabUser p
-		where docstatus < 2 and enabled = 1
-		and name not in ({})
-		and exists (select * from `tabHas Role` ur
-			where ur.parent = p.name and ur.role="System Manager")
-		order by creation desc""".format(", ".join(["%s"]*len(STANDARD_USERS))),
-			STANDARD_USERS, as_dict=True)
+
+def get_fullname_and_avatar(user: str) -> _dict:
+	result = frappe.get_cached_value("User", user, ["first_name", "last_name", "user_image", "name"])
+	if result is None:
+		frappe.throw(_("User does not exist"), frappe.DoesNotExistError)
+	first_name, last_name, avatar, name = result
+	return _dict(
+		{
+			"fullname": " ".join(list(filter(None, [first_name, last_name]))),
+			"avatar": avatar,
+			"name": name,
+		}
+	)
+
+
+def get_system_managers(only_name: bool = False) -> list[str]:
+	"""Return all system manager's user details."""
+	HasRole = DocType("Has Role")
+	User = DocType("User")
+
+	if only_name:
+		fields = [User.name]
+	else:
+		fields = [User.full_name, User.name]
+
+	system_managers = (
+		frappe.qb.from_(User)
+		.join(HasRole)
+		.on(HasRole.parent == User.name)
+		.where(
+			(HasRole.parenttype == "User")
+			& (User.enabled == 1)
+			& (HasRole.role == "System Manager")
+			& (User.docstatus < 2)
+			& (User.name.notin(frappe.STANDARD_USERS))
+		)
+		.select(*fields)
+		.orderby(User.creation, order=Order.desc)
+		.run(as_dict=True)
+	)
 
 	if only_name:
 		return [p.name for p in system_managers]
 	else:
-		return [email.utils.formataddr((p.fullname, p.name)) for p in system_managers]
+		return [formataddr((p.full_name, p.name)) for p in system_managers]
 
-def add_role(user, role):
+
+def add_role(user: str, role: str) -> None:
 	frappe.get_doc("User", user).add_roles(role)
 
-def add_system_manager(email, first_name=None, last_name=None, send_welcome_email=False):
+
+def add_system_manager(
+	email: str,
+	first_name: str | None = None,
+	last_name: str | None = None,
+	send_welcome_email: bool = False,
+	password: str | None = None,
+) -> "User":
 	# add user
 	user = frappe.new_doc("User")
-	user.update({
-		"name": email,
-		"email": email,
-		"enabled": 1,
-		"first_name": first_name or email,
-		"last_name": last_name,
-		"user_type": "System User",
-		"send_welcome_email": 1 if send_welcome_email else 0
-	})
+	user.update(
+		{
+			"name": email,
+			"email": email,
+			"enabled": 1,
+			"first_name": first_name or email,
+			"last_name": last_name,
+			"user_type": "System User",
+			"send_welcome_email": 1 if send_welcome_email else 0,
+		}
+	)
 
 	user.insert()
 
 	# add roles
-	roles = frappe.db.sql_list("""select name from `tabRole`
-		where name not in ("Administrator", "Guest", "All")""")
+	roles = frappe.get_all(
+		"Role",
+		fields=["name"],
+		filters={"name": ["not in", AUTOMATIC_ROLES]},
+	)
+	roles = [role.name for role in roles]
 	user.add_roles(*roles)
 
-def get_enabled_system_users():
-	return frappe.db.sql("""select * from tabUser where
-		user_type='System User' and enabled=1 and name not in ('Administrator', 'Guest')""", as_dict=1)
+	if password:
+		from frappe.utils.password import update_password
 
-def is_website_user():
-	return frappe.db.get_value('User', frappe.session.user, 'user_type') == "Website User"
+		update_password(user=user.name, pwd=password)
+	return user
 
-def is_system_user(username):
-	return frappe.db.get_value("User", {"name": username, "enabled": 1, "user_type": "System User"})
 
-def get_users():
+def get_enabled_system_users() -> list[dict]:
+	return frappe.get_all(
+		"User",
+		fields=["email", "language", "name"],
+		filters={
+			"user_type": "System User",
+			"enabled": 1,
+			"name": ["not in", ("Administrator", "Guest")],
+		},
+	)
+
+
+def is_website_user(username: str | None = None) -> str | None:
+	return frappe.get_cached_value("User", username or frappe.session.user, "user_type") == "Website User"
+
+
+def is_system_user(username: str | None = None) -> str | None:
+	# TODO: Depracate this. Inefficient, incorrect. This function is meant to be used in emails only.
+	# Problem: Filters on email instead of PK, implicitly filters out disabled users.
+	return frappe.db.get_value(
+		"User",
+		{
+			"email": username or frappe.session.user,
+			"enabled": 1,
+			"user_type": "System User",
+		},
+		cache=True,
+	)
+
+
+def get_users() -> list[dict]:
 	from frappe.core.doctype.user.user import get_system_users
-	users = []
-	system_managers = frappe.utils.user.get_system_managers(only_name=True)
-	for user in get_system_users():
-		users.append({
-			"full_name": frappe.utils.user.get_user_fullname(user),
+
+	system_managers = get_system_managers(only_name=True)
+
+	return [
+		{
+			"full_name": get_user_fullname(user),
 			"email": user,
-			"is_system_manager": 1 if (user in system_managers) else 0
-		})
+			"is_system_manager": user in system_managers,
+		}
+		for user in get_system_users()
+	]
 
-	return users
 
-def set_last_active_to_now(user):
-	from frappe.utils import now_datetime
-	frappe.db.set_value("User", user, "last_active", now_datetime())
+def get_users_with_role(role: str) -> list[str]:
+	User = DocType("User")
+	HasRole = DocType("Has Role")
 
-def disable_users(limits=None):
-	if not limits:
-		return
+	return (
+		frappe.qb.from_(HasRole)
+		.from_(User)
+		.where(
+			(HasRole.role == role)
+			& (User.name != "Administrator")
+			& (User.enabled == 1)
+			& (HasRole.parent == User.name)
+		)
+		.select(User.name)
+		.distinct()
+		.run(pluck=True)
+	)
 
-	if limits.get('users'):
-		system_manager = get_system_managers(only_name=True)[-1]
 
-		#exclude system manager from active user list
-		active_users =  frappe.db.sql_list("""select name from tabUser
-			where name not in ('Administrator', 'Guest', %s) and user_type = 'System User' and enabled=1
-			order by creation desc""", system_manager)
+def is_portal_user():
+	from frappe.utils import has_common
 
-		user_limit = cint(limits.get('users')) - 1
+	roles = get_portal_roles()
+	user_type = frappe.session.data.user_type
+	if user_type == "Website User" and has_common(frappe.get_roles(), roles):
+		return True
 
-		if len(active_users) > user_limit:
 
-			# if allowed user limit 1 then deactivate all additional users
-			# else extract additional user from active user list and deactivate them
-			if cint(limits.get('users')) != 1:
-				active_users = active_users[:-1 * user_limit]
+def get_portal_roles():
+	roles = []
+	for menu_item in frappe.get_single("Portal Settings").menu:
+		if menu_item.role and menu_item.role not in roles:
+			roles.append(menu_item.role)
 
-			for user in active_users:
-				frappe.db.set_value("User", user, 'enabled', 0)
-
-		from frappe.core.doctype.user.user import get_total_users
-
-		if get_total_users() > cint(limits.get('users')):
-			reset_simultaneous_sessions(cint(limits.get('users')))
-
-	frappe.db.commit()
-
-def reset_simultaneous_sessions(user_limit):
-	for user in frappe.db.sql("""select name, simultaneous_sessions from tabUser
-		where name not in ('Administrator', 'Guest') and user_type = 'System User' and enabled=1
-		order by creation desc""", as_dict=1):
-		if user.simultaneous_sessions < user_limit:
-			user_limit = user_limit - user.simultaneous_sessions
-		else:
-			frappe.db.set_value("User", user.name, "simultaneous_sessions", 1)
-			user_limit = user_limit - 1
-
+	return roles

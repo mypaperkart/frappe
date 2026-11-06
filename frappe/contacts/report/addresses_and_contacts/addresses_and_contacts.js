@@ -2,33 +2,32 @@
 // For license information, please see license.txt
 
 frappe.query_reports["Addresses And Contacts"] = {
-	"filters": [
+	filters: [
 		{
-			"reqd": 1,
-			"fieldname":"party_type",
-			"label": __("Party Type"),
-			"fieldtype": "Link",
-			"options": "DocType",
-			"get_query": function() {
+			reqd: 1,
+			fieldname: "reference_doctype",
+			label: __("Entity Type"),
+			fieldtype: "Link",
+			options: "DocType",
+			get_query: function () {
 				return {
-					"filters": {
-						"name": ["in","Customer,Supplier,Sales Partner"],
-					}
-				}
+					filters: {
+						name: ["in", "Contact, Address"],
+					},
+				};
 			},
-			"default": "Customer"
 		},
 		{
-			"fieldname":"party_name",
-			"label": __("Party Name"),
-			"fieldtype": "Dynamic Link",
-			"get_options": function() {
-				var party_type = frappe.query_report_filters_by_name.party_type.get_value();
-				if(!party_type) {
-					frappe.throw(__("Please select Party Type first"));
+			fieldname: "reference_name",
+			label: __("Entity Name"),
+			fieldtype: "Dynamic Link",
+			get_options: function () {
+				let reference_doctype = frappe.query_report.get_filter_value("reference_doctype");
+				if (!reference_doctype) {
+					frappe.throw(__("Please select Entity Type first"));
 				}
-				return party_type;
-			}
-		}
-	]
-}
+				return reference_doctype;
+			},
+		},
+	],
+};

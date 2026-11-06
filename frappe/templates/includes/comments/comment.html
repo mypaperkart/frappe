@@ -1,15 +1,18 @@
-<div class="blog-comment-row">
-	<div class="inline-block" style="vertical-align: top">
-		<div class="avatar avatar-medium" style="margin-top: 11px;">
-			<img itemprop="thumbnailUrl" src="{{ frappe.get_gravatar(comment.sender) }}" />
-		</div>
+{% from "frappe/templates/includes/avatar_macro.html" import avatar %}
+
+<div class="my-5 comment-row media">
+	<div class="comment-avatar">
+		{{  avatar(user_id=(frappe.utils.strip_html(comment.comment_email or comment.sender)), size='avatar-medium') }}
 	</div>
-	<div class="inline-block" style="width: calc(100% - 50px)">
-		<h6 itemprop="name">{{ comment.sender_full_name }}
-			<span class="text-muted pull-right" itemprop="commentTime">
-				{{ comment.creation|global_date_format }}
+	<div class="comment-content">
+		<div class="mb-2 head">
+			<span class="mr-2 title font-weight-bold">
+				{{ frappe.utils.strip_html(comment.sender_full_name or comment.comment_by) | e }}
 			</span>
-		</h6>
-		<div itemprop="commentText">{{ comment.content|markdown }}</div>
+			<span class="time small text-muted">
+				{{ frappe.utils.pretty_date(comment.creation) }}
+			</span>
+		</div>
+		<div id="{{ comment.name }}" class="content">{{ frappe.utils.strip_html(comment.content) | markdown }}</div>
 	</div>
 </div>

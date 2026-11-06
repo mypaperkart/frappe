@@ -1,78 +1,90 @@
-cur_frm.cscript.report_type = function(doc) {
-	cur_frm.set_intro("");
-	switch(doc.report_type) {
-		case "Report Builder":
-			cur_frm.set_intro(__("Report Builder reports are managed directly by the report builder. Nothing to do."));
-			break;
-		case "Query Report":
-			cur_frm.set_intro(__("Write a SELECT query. Note result is not paged (all data is sent in one go).")
-				+ __("To format columns, give column labels in the query.") + "<br>"
-				+ __("[Label]:[Field Type]/[Options]:[Width]") + "<br><br>"
-				+ __("Example:") + "<br>"
-				+ "Employee:Link/Employee:200" + "<br>"
-				+ "Rate:Currency:120" + "<br>")
-			break;
-		case "Script Report":
-			cur_frm.set_intro(__("Write a Python file in the same folder where this is saved and return column and result."))
-			break;
-	}
-}
+// Copyright (c) 2022, Frappe Technologies and contributors
+// For license information, please see license.txt
 
-cur_frm.cscript.refresh = function(doc) {
-	cur_frm.add_custom_button("Show Report", function() {
-		switch(doc.report_type) {
-			case "Report Builder":
-				frappe.set_route("Report", doc.ref_doctype, doc.name);
-				break;
-			case "Query Report":
-				frappe.set_route("query-report", doc.name);
-				break;
-			case "Script Report":
-				frappe.set_route("query-report", doc.name);
-				break;
-		}
-	}, "fa fa-table");
-
-	if (doc.is_standard === "Yes") {
-		cur_frm.add_custom_button(doc.disabled ? __("Enable Report") : __("Disable Report"), function() {
-			$.ajax({
-				url: "/api/resource/Report/" + encodeURIComponent(doc.name),
-				type: "POST",
-				data: {
-					run_method: "toggle_disable",
-					disable: doc.disabled ? 0 : 1
-				}
-			}).always(function() {
-				cur_frm.reload_doc();
-			});
-		}, doc.disabled ? "fa fa-check" : "fa fa-off");
-	}
-
-	cur_frm.cscript.report_type(doc);
-}
-
-
-frappe.ui.form.on('Report', {
-	refresh: function(frm) {
-		if(!frappe.boot.developer_mode && user != 'Administrator') {
+frappe.ui.form.on("Report", {
+	refresh: function (frm) {
+		const can_write = frm.perm[0].write;
+		if (frm.doc.is_standard === "Yes" && !frappe.boot.developer_mode) {
 			// make the document read-only
-			frm.set_read_only();
+			frm.disable_form();
+		} else {
+			frm.enable_save();
 		}
-	},
 
-	ref_doctype: function(frm) {
-		if(frm.doc.ref_doctype) {
-			frm.trigger("set_doctype_roles")
+		let doc = frm.doc;
+		if (!doc.__islocal) {
+			frm.add_custom_button(__("Show Report"), function () {
+				switch (doc.report_type) {
+					case "Report Builder":
+						frappe.set_route("List", doc.ref_doctype, "Report", doc.name);
+						break;
+					case "Query Report":
+						frappe.set_route("query-report", doc.name);
+						break;
+					case "Script Report":
+						frappe.set_route("query-report", doc.name);
+						break;
+					case "Custom Report":
+						frappe.set_route("query-report", doc.name);
+						break;
+				}
+			});
 		}
-	},
 
-	set_doctype_roles: function(frm) {
-		return frappe.call({
-			method: "set_doctype_roles",
-			doc:frm.doc,
-			callback: function(r) {
-				refresh_field('roles')
+		if (doc.is_standard === "Yes" && can_write) {
+			frm.add_custom_button(
+				doc.disabled ? __("Enable Report") : __("Disable Report"),
+				function () {
+					frm.call("toggle_disable", {
+						disable: doc.disabled ? 0 : 1,
+					}).then(() => {
+						frm.reload_doc();
+					});
+				}
+			);
+		}
+
+		frm.set_query("ref_doctype", () => {
+			return {
+				filters: {
+					istable: 0,
+				},
+			};
+		});
+
+		frm.set_query("default_print_format", () => {
+			return {
+				filters: {
+					print_format_for: "Report",
+					report: frm.doc.name,
+					disabled: 0,
+				},
+			};
+		});
+
+		frm.set_query("default_letter_head", () => {
+			const filters = {
+				letter_head_for: "Report",
+				disabled: 0,
+			};
+
+			if (frm.doc.is_standard === "Yes") {
+				filters.standard = "Yes";
 			}
-		})
-	}
-})
+
+			return { filters };
+		});
+	},
+
+	ref_doctype: function (frm) {
+		if (frm.doc.ref_doctype) {
+			frm.trigger("set_doctype_roles");
+		}
+	},
+
+	set_doctype_roles: function (frm) {
+		return frm.call("set_doctype_roles").then(() => {
+			frm.refresh_field("roles");
+		});
+	},
+});

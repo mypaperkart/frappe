@@ -1,5 +1,5 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
-# MIT License. See license.txt
+# License: MIT. See LICENSE
 """
 Events:
 	always
@@ -8,298 +8,287 @@ Events:
 	weekly
 """
 
-from __future__ import unicode_literals, print_function
+import datetime
+import os
+import random
+import time
+from typing import NoReturn
+
+from redis.exceptions import RedisError
+from rq.defaults import DEFAULT_WORKER_TTL
 
 import frappe
-import json
-import schedule
-import time
-import MySQLdb
-import frappe.utils
-from frappe.utils import get_sites
-from datetime import datetime
-from background_jobs import enqueue, get_jobs, queue_timeout
-from frappe.limits import has_expired
-from frappe.utils.data import get_datetime, now_datetime
-from frappe.core.doctype.user.user import STANDARD_USERS
-from frappe.installer import update_site_config
+from frappe.utils import cint, get_bench_id, get_bench_path, get_datetime, get_sites, now_datetime
+from frappe.utils.background_jobs import get_redis_conn, set_niceness
+from frappe.utils.caching import redis_cache
 
-DATETIME_FORMAT = '%Y-%m-%d %H:%M:%S'
+DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+DEFAULT_SCHEDULER_TICK = 4 * 60
+SCHEDULER_HEARTBEAT_INTERVAL = 30
+SCHEDULER_HEARTBEAT_TTL = DEFAULT_WORKER_TTL
 
-def start_scheduler():
-	'''Run enqueue_events_for_all_sites every 2 minutes (default).
-	Specify scheduler_interval in seconds in common_site_config.json'''
 
-	interval = frappe.get_conf().scheduler_interval or 240
-	schedule.every(interval).seconds.do(enqueue_events_for_all_sites)
+def cprint(*args, **kwargs):
+	"""Prints only if called from STDOUT"""
+	try:
+		os.get_terminal_size()
+		print(*args, **kwargs)
+	except Exception:
+		pass
+
+
+def start_scheduler() -> NoReturn:
+	"""Run enqueue_events_for_all_sites based on scheduler tick.
+	Specify scheduler_tick_interval in seconds in common_site_config.json"""
+	# Lazy: filelock imports the asyncio stack.
+	from filelock import FileLock, Timeout
+
+	tick = get_scheduler_tick()
+	set_niceness()
+
+	lock_path = _get_scheduler_lock_file()
+
+	try:
+		lock = FileLock(lock_path)
+		lock.acquire(blocking=False)
+	except Timeout:
+		frappe.logger("scheduler").debug("Scheduler already running")
+		return
 
 	while True:
-		schedule.run_pending()
-		time.sleep(1)
+		_sleep_with_scheduler_heartbeat(sleep_duration(tick))
+		enqueue_events_for_all_sites()
 
-def enqueue_events_for_all_sites():
-	'''Loop through sites and enqueue events that are not already queued'''
+
+def _get_scheduler_lock_file() -> True:
+	return os.path.abspath(os.path.join(get_bench_path(), "config", "scheduler_process"))
+
+
+def _get_scheduler_heartbeat_key() -> str:
+	return f"{get_bench_id()}:scheduler:heartbeat"
+
+
+def _update_scheduler_heartbeat() -> None:
+	try:
+		get_redis_conn().set(
+			_get_scheduler_heartbeat_key(),
+			time.time(),
+			ex=SCHEDULER_HEARTBEAT_TTL,
+		)
+	except RedisError:
+		frappe.logger("scheduler").warning("Failed to update scheduler heartbeat", exc_info=True)
+
+
+def _sleep_with_scheduler_heartbeat(duration: float) -> None:
+	deadline = time.monotonic() + duration
+
+	while True:
+		_update_scheduler_heartbeat()
+		remaining = deadline - time.monotonic()
+		if remaining <= 0:
+			return
+		time.sleep(min(SCHEDULER_HEARTBEAT_INTERVAL, remaining))
+
+
+def is_scheduler_process_running() -> bool:
+	"""Check whether the scheduler is publishing a heartbeat to the shared queue Redis."""
+	return bool(get_redis_conn().exists(_get_scheduler_heartbeat_key()))
+
+
+def sleep_duration(tick):
+	if tick != DEFAULT_SCHEDULER_TICK:
+		# Assuming user knows what they want.
+		return tick
+
+	# Sleep until next multiple of tick.
+	# This makes scheduler aligned with real clock,
+	# so event scheduled at 12:00 happen at 12:00 and not 12:00:35.
+	minutes = tick // 60
+	now = datetime.datetime.now(datetime.UTC)
+	left_minutes = minutes - now.minute % minutes
+	# `now.minute % minutes` is in [0, minutes), so left_minutes is in (0, minutes].
+	assert 0 < left_minutes <= minutes, "next tick must be at least one minute and within one tick window"
+	next_execution = now.replace(second=0) + datetime.timedelta(minutes=left_minutes)
+
+	return (next_execution - now).total_seconds()
+
+
+def enqueue_events_for_all_sites() -> None:
+	"""Loop through sites and enqueue events that are not already queued"""
+
 	with frappe.init_site():
-		jobs_per_site = get_jobs()
 		sites = get_sites()
 
+	# Sites are sorted in alphabetical order, shuffle to randomize priorities
+	random.shuffle(sites)
+
 	for site in sites:
+		_update_scheduler_heartbeat()
 		try:
-			enqueue_events_for_site(site=site, queued_jobs=jobs_per_site[site])
-		except:
-			# it should try to enqueue other sites
-			print(frappe.get_traceback())
+			enqueue_events_for_site(site=site)
+		except Exception:
+			frappe.logger("scheduler").debug(f"Failed to enqueue events for site: {site}", exc_info=True)
 
-def enqueue_events_for_site(site, queued_jobs):
+
+def enqueue_events_for_site(site: str) -> None:
+	def log_exc():
+		frappe.logger("scheduler").error(f"Exception in Enqueue Events for Site {site}", exc_info=True)
+
 	try:
-		frappe.init(site=site)
-		if frappe.local.conf.maintenance_mode:
-			return
-
-		if frappe.local.conf.pause_scheduler:
-			return
-
+		frappe.init(site)
 		frappe.connect()
-		if is_scheduler_disabled():
+		if is_scheduler_inactive():
 			return
 
-		enqueue_events(site=site, queued_jobs=queued_jobs)
+		enqueue_events()
 
-		frappe.logger(__name__).debug('Queued events for site {0}'.format(site))
-
-	except:
-		frappe.logger(__name__).error('Exception in Enqueue Events for Site {0}'.format(site) +
-			'\n' + frappe.get_traceback())
-		raise
+		frappe.logger("scheduler").debug(f"Queued events for site {site}")
+	except Exception as e:
+		if frappe.db.is_access_denied(e):
+			frappe.logger("scheduler").debug(f"Access denied for site {site}")
+		log_exc()
 
 	finally:
 		frappe.destroy()
 
-def enqueue_events(site, queued_jobs):
-	nowtime = frappe.utils.now_datetime()
-	last = frappe.db.get_value('System Settings', 'System Settings', 'scheduler_last_event')
 
-	# set scheduler last event
-	frappe.db.set_value('System Settings', 'System Settings',
-		'scheduler_last_event', nowtime.strftime(DATETIME_FORMAT),
-		update_modified=False)
-	frappe.db.commit()
+def enqueue_events() -> list[str] | None:
+	if schedule_jobs_based_on_activity():
+		from croniter import CroniterBadCronError
 
-	out = []
-	if last:
-		last = datetime.strptime(last, DATETIME_FORMAT)
-		out = enqueue_applicable_events(site, nowtime, last, queued_jobs)
+		from frappe.core.doctype.scheduled_job_type.scheduled_job_type import get_disabled_app_job_methods
 
-	return '\n'.join(out)
+		enqueued_jobs = []
+		filters = {"stopped": 0}
+		if disabled_methods := get_disabled_app_job_methods():
+			filters["method"] = ["not in", disabled_methods]
 
-def enqueue_applicable_events(site, nowtime, last, queued_jobs=()):
-	nowtime_str = nowtime.strftime(DATETIME_FORMAT)
-	out = []
+		all_jobs = frappe.get_docs("Scheduled Job Type", filters=filters)
+		random.shuffle(all_jobs)
+		for job_type in all_jobs:
+			try:
+				if job_type.enqueue():
+					enqueued_jobs.append(job_type.method)
+			except CroniterBadCronError:
+				frappe.logger("scheduler").error(
+					f"Invalid Job on {frappe.local.site} - {job_type.name}", exc_info=True
+				)
 
-	enabled_events = get_enabled_scheduler_events()
+		return enqueued_jobs
 
-	def trigger_if_enabled(site, event):
-		if event in enabled_events:
-			trigger(site, event, queued_jobs)
-			_log(event)
 
-	def _log(event):
-		out.append("{time} - {event} - queued".format(time=nowtime_str, event=event))
-
-	if nowtime.day != last.day:
-		# if first task of the day execute daily tasks
-		trigger_if_enabled(site, "daily")
-		trigger_if_enabled(site, "daily_long")
-
-		if nowtime.month != last.month:
-			trigger_if_enabled(site, "monthly")
-			trigger_if_enabled(site, "monthly_long")
-
-		if nowtime.weekday()==0:
-			trigger_if_enabled(site, "weekly")
-			trigger_if_enabled(site, "weekly_long")
-
-		if "all" not in enabled_events:
-			trigger(site, "all", queued_jobs)
-
-		if "hourly" not in enabled_events:
-			trigger(site, "hourly", queued_jobs)
-
-	if nowtime.hour != last.hour:
-		trigger_if_enabled(site, "hourly")
-		trigger_if_enabled(site, "hourly_long")
-
-		if "all" not in enabled_events:
-			trigger(site, "all", queued_jobs)
-
-	trigger_if_enabled(site, "all")
-
-	return out
-
-def trigger(site, event, queued_jobs=(), now=False):
-	"""trigger method in hooks.scheduler_events"""
-	queue = 'long' if event.endswith('_long') else 'short'
-	timeout = queue_timeout[queue]
-	if not queued_jobs and not now:
-		queued_jobs = get_jobs(site=site, queue=queue)
-
-	if frappe.flags.in_test:
-		frappe.flags.ran_schedulers.append(event)
-
-	events = get_scheduler_events(event)
-	if not events:
-		return
-
-	for handler in events:
-		if not now:
-			if handler not in queued_jobs:
-				enqueue(handler, queue, timeout, event)
-		else:
-			scheduler_task(site=site, event=event, handler=handler, now=True)
-
-def get_scheduler_events(event):
-	'''Get scheduler events from hooks and integrations'''
-	scheduler_events = frappe.cache().get_value('scheduler_events')
-	if not scheduler_events:
-		scheduler_events = frappe.get_hooks("scheduler_events")
-		frappe.cache().set_value('scheduler_events', scheduler_events)
-
-	return scheduler_events.get(event) or []
-
-def log(method, message=None):
-	"""log error in patch_log"""
-	message = frappe.utils.cstr(message) + "\n" if message else ""
-	message += frappe.get_traceback()
-
-	if not (frappe.db and frappe.db._conn):
-		frappe.connect()
-
-	frappe.db.rollback()
-	frappe.db.begin()
-
-	d = frappe.new_doc("Error Log")
-	d.method = method
-	d.error = message
-	d.insert(ignore_permissions=True)
-
-	frappe.db.commit()
-
-	return message
-
-def get_enabled_scheduler_events():
-	if 'enabled_events' in frappe.flags:
-		return frappe.flags.enabled_events
-
-	enabled_events = frappe.db.get_global("enabled_scheduler_events")
-	if enabled_events:
-		if isinstance(enabled_events, basestring):
-			enabled_events = json.loads(enabled_events)
-
-		return enabled_events
-
-	return ["all", "hourly", "hourly_long", "daily", "daily_long",
-		"weekly", "weekly_long", "monthly", "monthly_long"]
-
-def is_scheduler_disabled():
-	if frappe.conf.disable_scheduler:
+def is_scheduler_inactive(verbose=True) -> bool:
+	if frappe.local.conf.maintenance_mode:
+		if verbose:
+			cprint(f"{frappe.local.site}: Maintenance mode is ON")
 		return True
 
-	return not frappe.utils.cint(frappe.db.get_single_value("System Settings", "enable_scheduler"))
+	if frappe.local.conf.pause_scheduler:
+		if verbose:
+			cprint(f"{frappe.local.site}: frappe.conf.pause_scheduler is SET")
+		return True
+
+	if is_scheduler_disabled(verbose=verbose):
+		return True
+
+	return False
+
+
+def is_scheduler_disabled(verbose=True) -> bool:
+	if frappe.conf.disable_scheduler:
+		if verbose:
+			cprint(f"{frappe.local.site}: frappe.conf.disable_scheduler is SET")
+		return True
+
+	scheduler_disabled = not frappe.get_system_settings("enable_scheduler")
+	if scheduler_disabled:
+		if verbose:
+			cprint(f"{frappe.local.site}: SystemSettings.enable_scheduler is UNSET")
+	return scheduler_disabled
+
 
 def toggle_scheduler(enable):
-	frappe.db.set_value("System Settings", None, "enable_scheduler", 1 if enable else 0)
+	frappe.db.set_single_value("System Settings", "enable_scheduler", int(enable))
+
 
 def enable_scheduler():
 	toggle_scheduler(True)
 
+
 def disable_scheduler():
 	toggle_scheduler(False)
 
-def get_errors(from_date, to_date, limit):
-	errors = frappe.db.sql("""select modified, method, error from `tabError Log`
-		where date(modified) between %s and %s
-		and error not like '%%[Errno 110] Connection timed out%%'
-		order by modified limit %s""", (from_date, to_date, limit), as_dict=True)
-	return ["""<p>Time: {modified}</p><pre><code>Method: {method}\n{error}</code></pre>""".format(**e)
-		for e in errors]
 
-def get_error_report(from_date=None, to_date=None, limit=10):
-	from frappe.utils import get_url, now_datetime, add_days
-
-	if not from_date:
-		from_date = add_days(now_datetime().date(), -1)
-	if not to_date:
-		to_date = add_days(now_datetime().date(), -1)
-
-	errors = get_errors(from_date, to_date, limit)
-
-	if errors:
-		return 1, """<h4>Error Logs (max {limit}):</h4>
-			<p>URL: <a href="{url}" target="_blank">{url}</a></p><hr>{errors}""".format(
-			limit=limit, url=get_url(), errors="<hr>".join(errors))
-	else:
-		return 0, "<p>No error logs</p>"
-
-def scheduler_task(site, event, handler, now=False):
-	'''This is a wrapper function that runs a hooks.scheduler_events method'''
-	frappe.logger(__name__).info('running {handler} for {site} for event: {event}'.format(handler=handler, site=site, event=event))
-	try:
-		if not now:
-			frappe.connect(site=site)
-
-		frappe.flags.in_scheduler = True
-		frappe.get_attr(handler)()
-
-	except Exception:
-		frappe.db.rollback()
-		traceback = log(handler, "Method: {event}, Handler: {handler}".format(event=event, handler=handler))
-		frappe.logger(__name__).error(traceback)
-		raise
-
-	else:
-		frappe.db.commit()
-
-	frappe.logger(__name__).info('ran {handler} for {site} for event: {event}'.format(handler=handler, site=site, event=event))
-
-
-def reset_enabled_scheduler_events(login_manager):
-	if login_manager.info.user_type == "System User":
-		try:
-			frappe.db.set_global('enabled_scheduler_events', None)
-		except MySQLdb.OperationalError as e:
-			if e.args[0]==1205:
-				frappe.log_error(frappe.get_traceback(), "Error in reset_enabled_scheduler_events")
-			else:
-				raise
+@redis_cache(ttl=60 * 60)
+def schedule_jobs_based_on_activity(check_time=None):
+	"""Return True for active sites as defined by `Activity Log`.
+	Also return True for inactive sites once every 24 hours based on `Scheduled Job Log`."""
+	if is_dormant(check_time=check_time):
+		# ensure last job is one day old
+		last_job_timestamp = _get_last_creation_timestamp("Scheduled Job Log")
+		if not last_job_timestamp:
+			return True
 		else:
-			is_dormant = frappe.conf.get('dormant')
-			if is_dormant:
-				update_site_config('dormant', 'None')
+			if ((check_time or now_datetime()) - last_job_timestamp).total_seconds() >= 86400:
+				# one day is passed since jobs are run, so lets do this
+				return True
+			else:
+				# schedulers run in the last 24 hours, do nothing
+				return False
+	else:
+		# site active, lets run the jobs
+		return True
 
-def disable_scheduler_on_expiry():
-	if has_expired():
-		disable_scheduler()
 
-def restrict_scheduler_events_if_dormant():
-	if is_dormant():
-		restrict_scheduler_events()
-		update_site_config('dormant', True)
+@redis_cache(ttl=60 * 60)
+def is_dormant(check_time=None):
+	from frappe.utils.frappecloud import on_frappecloud
 
-def restrict_scheduler_events(*args, **kwargs):
-	val = json.dumps(["hourly", "hourly_long", "daily", "daily_long", "weekly", "weekly_long", "monthly", "monthly_long"])
-	frappe.db.set_global('enabled_scheduler_events', val)
+	if frappe.conf.developer_mode or not on_frappecloud():
+		return False
+	threshold = cint(frappe.get_system_settings("dormant_days")) * 86400
+	if not threshold:
+		return False
 
-def is_dormant(since = 345600):
-	last_active = get_datetime(get_last_active())
-	# Get now without tz info
-	now = now_datetime().replace(tzinfo=None)
-	time_since_last_active = now - last_active
-	if time_since_last_active.total_seconds() > since:  # 4 days
+	last_activity = frappe.db.get_value(
+		"User", filters={}, fieldname="last_active", order_by="last_active desc"
+	)
+
+	if not last_activity:
+		return True
+	if ((check_time or now_datetime()) - last_activity).total_seconds() >= threshold:
 		return True
 	return False
 
-def get_last_active():
-	return frappe.db.sql("""select max(ifnull(last_active, "2000-01-01 00:00:00")) from `tabUser`
-		where user_type = 'System User' and name not in ({standard_users})"""\
-		.format(standard_users=", ".join(["%s"]*len(STANDARD_USERS))),
-		STANDARD_USERS)[0][0]
+
+def _get_last_creation_timestamp(doctype):
+	timestamp = frappe.db.get_value(doctype, filters={}, fieldname="creation", order_by="creation desc")
+	if timestamp:
+		return get_datetime(timestamp)
+
+
+@frappe.whitelist()
+def activate_scheduler():
+	from frappe.installer import update_site_config
+
+	frappe.only_for("Administrator")
+
+	if frappe.local.conf.maintenance_mode:
+		frappe.throw(frappe._("Scheduler can not be re-enabled when maintenance mode is active."))
+
+	if is_scheduler_disabled():
+		enable_scheduler()
+	if frappe.conf.pause_scheduler:
+		update_site_config("pause_scheduler", 0)
+
+
+@frappe.whitelist()
+def get_scheduler_status():
+	if is_scheduler_inactive():
+		return {"status": "inactive"}
+	return {"status": "active"}
+
+
+def get_scheduler_tick() -> int:
+	conf = frappe.get_conf()
+	return cint(conf.scheduler_tick_interval) or DEFAULT_SCHEDULER_TICK

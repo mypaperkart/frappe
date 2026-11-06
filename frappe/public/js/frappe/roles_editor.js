@@ -1,200 +1,208 @@
-frappe.RoleEditor = Class.extend({
-	init: function(wrapper, frm) {
-		var me = this;
+frappe.RoleEditor = class {
+	/**
+	 * Create a role editor for a form child table.
+	 *
+	 * @param {HTMLElement|JQuery} wrapper Container for the MultiCheck control.
+	 * @param {frappe.ui.form.Form} frm Form whose role rows are edited.
+	 * @param {boolean|number|Object} [disable=false] Disable role selection inputs, or pass role row configuration as the third argument.
+	 * @param {Object} [options] Role row configuration overrides.
+	 * @param {string} [options.table_fieldname="roles"] Child table field containing role rows.
+	 * @param {string} [options.role_fieldname="role"] Field in each child row that stores the role value.
+	 * @param {string} [options.child_doctype] Child DocType used when adding role rows. Defaults to the table field's configured child DocType or "Has Role".
+	 */
+	constructor(wrapper, frm, disable = false, options = {}) {
+		if (disable && typeof disable === "object") {
+			options = disable;
+			disable = false;
+		}
+
+		const { table_fieldname = "roles", role_fieldname = "role", child_doctype } = options;
+		const configured_child_doctype = frappe.meta.get_docfield(
+			frm.doctype,
+			table_fieldname
+		)?.options;
+
 		this.frm = frm;
 		this.wrapper = wrapper;
-		$(wrapper).html('<div class="help">' + __("Loading") + '...</div>')
-		return frappe.call({
-			method: 'frappe.core.doctype.user.user.get_all_roles',
-			callback: function(r) {
-				me.roles = r.message;
-				me.show_roles();
-
-				// refresh call could've already happened
-				// when all role checkboxes weren't created
-				if(me.frm.doc) {
-					me.frm.roles_editor.show();
-				}
-			}
+		this.disable = Boolean(disable);
+		this.table_fieldname = table_fieldname;
+		this.role_fieldname = role_fieldname;
+		this.child_doctype = child_doctype || configured_child_doctype || "Has Role";
+		let user_roles = this.get_selected_roles();
+		this.multicheck = frappe.ui.form.make_control({
+			parent: wrapper,
+			df: {
+				fieldname: this.table_fieldname,
+				fieldtype: "MultiCheck",
+				select_all: true,
+				columns: "15rem",
+				get_data: () => {
+					return frappe
+						.xcall("frappe.core.doctype.user.user.get_all_roles")
+						.then((roles) => {
+							return roles.map((role) => {
+								return {
+									label: __(role),
+									value: role,
+									checked: user_roles.includes(role),
+								};
+							});
+						});
+				},
+				on_change: () => {
+					this.set_roles_in_table();
+					this.frm.dirty();
+				},
+			},
+			render_input: true,
 		});
-	},
-	show_roles: function() {
-		var me = this;
-		$(this.wrapper).empty();
-		var role_toolbar = $('<p><button class="btn btn-default btn-add btn-sm" style="margin-right: 5px;"></button>\
-			<button class="btn btn-sm btn-default btn-remove"></button></p>').appendTo($(this.wrapper));
 
-		role_toolbar.find(".btn-add")
-			.html(__('Add all roles'))
-			.on("click", function () {
-				$(me.wrapper).find('input[type="checkbox"]').each(function (i, check) {
-					if (!$(check).is(":checked")) {
-						check.checked = true;
-					}
-				});
+		let original_func = this.multicheck.make_checkboxes;
+		this.multicheck.make_checkboxes = () => {
+			original_func.call(this.multicheck);
+			this.multicheck.$wrapper.find(".label-area").click((e) => {
+				let role = $(e.target).data("unit");
+				role && this.show_permissions(role);
+				e.preventDefault();
 			});
-
-		role_toolbar.find(".btn-remove")
-			.html(__('Clear all roles'))
-			.on("click", function() {
-				$(me.wrapper).find('input[type="checkbox"]').each(function(i, check) {
-					if($(check).is(":checked")) {
-						check.checked = false;
-					}
-				});
-			});
-
-		$.each(this.roles, function(i, role) {
-			$(me.wrapper).append(repl('<div class="user-role" \
-				data-user-role="%(role_value)s">\
-				<input type="checkbox" style="margin-top:0px;"> \
-				<a href="#" class="grey role">%(role_display)s</a>\
-			</div>', {role_value: role,role_display:__(role)}));
-		});
-
-		$(this.wrapper).find('input[type="checkbox"]').change(function() {
-			me.set_roles_in_table();
-			me.frm.dirty();
-		});
-		$(this.wrapper).find('.user-role a').click(function() {
-			me.show_permissions($(this).parent().attr('data-user-role'))
-			return false;
-		});
-	},
-	show: function() {
-		var me = this;
-
-		// uncheck all roles
-		$(this.wrapper).find('input[type="checkbox"]')
-			.each(function(i, checkbox) { checkbox.checked = false; });
-
-		// set user roles as checked
-		$.each((me.frm.doc.roles || []), function(i, user_role) {
-			var checkbox = $(me.wrapper)
-				.find('[data-user-role="'+user_role.role+'"] input[type="checkbox"]').get(0);
-			if(checkbox) checkbox.checked = true;
-		});
-	},
-	set_roles_in_table: function() {
-		var opts = this.get_roles();
-		var existing_roles_map = {};
-		var existing_roles_list = [];
-		var me = this;
-
-		$.each((me.frm.doc.roles || []), function(i, user_role) {
-			existing_roles_map[user_role.role] = user_role.name;
-			existing_roles_list.push(user_role.role);
-		});
-
-		// remove unchecked roles
-		$.each(opts.unchecked_roles, function(i, role) {
-			if(existing_roles_list.indexOf(role)!=-1) {
-				frappe.model.clear_doc("Has Role", existing_roles_map[role]);
-			}
-		});
-
-		// add new roles that are checked
-		$.each(opts.checked_roles, function(i, role) {
-			if(existing_roles_list.indexOf(role)==-1) {
-				var user_role = frappe.model.add_child(me.frm.doc, "Has Role", "roles");
-				user_role.role = role;
-			}
-		});
-
-		refresh_field("roles");
-	},
-	get_roles: function() {
-		var checked_roles = [];
-		var unchecked_roles = [];
-		$(this.wrapper).find('[data-user-role]').each(function() {
-			if($(this).find('input[type="checkbox"]:checked').length) {
-				checked_roles.push($(this).attr('data-user-role'));
-			} else {
-				unchecked_roles.push($(this).attr('data-user-role'));
-			}
-		});
-
-		return {
-			checked_roles: checked_roles,
-			unchecked_roles: unchecked_roles
-		}
-	},
-	show_permissions: function(role) {
-		// show permissions for a role
-		var me = this;
-		if(!this.perm_dialog)
-			this.make_perm_dialog()
-		$(this.perm_dialog.body).empty();
-		return frappe.call({
-			method: 'frappe.core.doctype.user.user.get_perm_info',
-			args: {role: role},
-			callback: function(r) {
-				var $body = $(me.perm_dialog.body);
-				// TODO fix the overflow issue and also display perms like report, import, etc.
-
-				$body.append('<table class="user-perm"><thead><tr>'
-					+ '<th style="text-align: left">' + __('Document Type') + '</th>'
-					+ '<th>' + __('Level') + '</th>'
-					+ '<th>' + __('Apply User Permissions') + '</th>'
-					+ '<th>' + __('Read') + '</th>'
-					+ '<th>' + __('Write') + '</th>'
-					+ '<th>' + __('Create') + '</th>'
-					+ '<th>' + __('Delete') + '</th>'
-					+ '<th>' + __('Submit') + '</th>'
-					+ '<th>' + __('Cancel') + '</th>'
-					+ '<th>' + __('Amend') + '</th>'
-					// + '<th>' + __('Report') + '</th>'
-					// + '<th>' + __('Import') + '</th>'
-					// + '<th>' + __('Export') + '</th>'
-					// + '<th>' + __('Print') + '</th>'
-					// + '<th>' + __('Email') + '</th>'
-					+ '<th>' + __('Set User Permissions') + '</th>'
-					+ '</tr></thead><tbody></tbody></table>');
-
-				for(var i=0, l=r.message.length; i<l; i++) {
-					var perm = r.message[i];
-
-					// if permission -> icon
-					for(var key in perm) {
-						if(key!='parent' && key!='permlevel') {
-							if(perm[key]) {
-								perm[key] = '<i class="fa fa-check"></i>';
-							} else {
-								perm[key] = '';
-							}
-						}
-					}
-
-					$body.find('tbody').append(repl('<tr>\
-						<td style="text-align: left">%(parent)s</td>\
-						<td>%(permlevel)s</td>\
-						<td>%(apply_user_permissions)s</td>\
-						<td>%(read)s</td>\
-						<td>%(write)s</td>\
-						<td>%(create)s</td>\
-						<td>%(delete)s</td>\
-						<td>%(submit)s</td>\
-						<td>%(cancel)s</td>\
-						<td>%(amend)s</td>'
-						// + '<td>%(report)s</td>\
-						// <td>%(import)s</td>\
-						// <td>%(export)s</td>\
-						// <td>%(print)s</td>\
-						// <td>%(email)s</td>'
-						+ '<td>%(set_user_permissions)s</td>\
-						</tr>', perm))
-				}
-
-				me.perm_dialog.show();
-			}
-		});
-
-	},
-	make_perm_dialog: function() {
-		this.perm_dialog = new frappe.ui.Dialog({
-			title:__('Role Permissions')
-		});
-
-		this.perm_dialog.$wrapper.find('.modal-dialog').css("width", "800px");
+			this.set_enable_disable();
+		};
 	}
-});
+	set_enable_disable() {
+		$(this.wrapper)
+			.find('input[type="checkbox"]')
+			.attr("disabled", this.disable ? true : false);
+		$(this.wrapper)
+			.find("button")
+			.attr("disabled", this.disable ? true : false);
+	}
+	show_permissions(role) {
+		// show permissions for a role
+		if (!this.perm_dialog) {
+			this.make_perm_dialog();
+		}
+		$(this.perm_dialog.body).empty();
+		let is_dark = document.documentElement.getAttribute("data-theme") === "dark";
+		let header_bg_color = is_dark ? "bg-dark text-white" : "bg-light";
+		return frappe
+			.xcall("frappe.core.doctype.user.user.get_perm_info", { role })
+			.then((permissions) => {
+				const $body = $(this.perm_dialog.body);
+				if (!permissions.length) {
+					$body.append(`<div class="text-muted text-center padding">
+						${__("{0} role does not have permission on any doctype", [__(role)])}
+					</div>`);
+				} else {
+					// standard rights + any custom permission types for the doctypes shown
+					const rights = [
+						...frappe.perm.rights,
+						...new Set(
+							permissions.flatMap(
+								(perm) => frappe.boot?.doctype_ptype_map?.[perm.parent] || []
+							)
+						),
+					];
+					$body.append(`
+						<div style="max-height:calc(100vh - 200px); overflow-y:auto;">
+							<table class="user-perm">
+								<thead>
+									<tr>
+										<th class="sticky-top ${header_bg_color}"> ${__("Document Type")} </th>
+										<th class="sticky-top ${header_bg_color}"> ${__("Level")} </th>
+										<th class="sticky-top ${header_bg_color}"> ${__("If Owner")} </th>
+										${rights
+											.map(
+												(p) =>
+													`<th class="sticky-top ${header_bg_color}">${__(
+														frappe.unscrub(p)
+													)}</th>`
+											)
+											.join("")}
+									</tr>
+								</thead>
+								<tbody></tbody>
+							</table>
+						</div>
+					`);
+					permissions.forEach((perm) => {
+						$body.find("tbody").append(`
+							<tr>
+								<td>${__(perm.parent)}</td>
+								<td>${perm.permlevel}</td>
+								<td>${perm.if_owner ? frappe.utils.icon("check", "xs") : "-"}</td>
+								${rights
+									.map(
+										(p) =>
+											`<td class="text-muted bold">${
+												perm[p] ? frappe.utils.icon("check", "xs") : "-"
+											}</td>`
+									)
+									.join("")}
+							</tr>
+						`);
+					});
+				}
+				this.perm_dialog.set_title(__(role));
+				this.perm_dialog.show();
+			});
+	}
+	make_perm_dialog() {
+		this.perm_dialog = new frappe.ui.Dialog({
+			title: __("Role Permissions"),
+		});
+
+		this.perm_dialog.$wrapper
+			.find(".modal-dialog")
+			.css("width", "auto")
+			.css("max-width", "1200px");
+
+		this.perm_dialog.$wrapper.find(".modal-body").css("overflow", "overlay");
+	}
+	show() {
+		this.reset();
+		this.set_enable_disable();
+	}
+
+	reset() {
+		let user_roles = this.get_selected_roles();
+		this.multicheck.selected_options = user_roles;
+		this.multicheck.refresh_input();
+	}
+	set_roles_in_table() {
+		let roles = this.get_role_rows();
+		let checked_options = this.multicheck.get_checked_options();
+		roles.forEach((role_doc) => {
+			if (!checked_options.includes(this.get_role_value(role_doc))) {
+				frappe.model.clear_doc(role_doc.doctype, role_doc.name);
+			}
+		});
+		checked_options.forEach((role) => {
+			if (!roles.find((d) => this.get_role_value(d) === role)) {
+				let role_doc = frappe.model.add_child(
+					this.frm.doc,
+					this.child_doctype,
+					this.table_fieldname
+				);
+				this.set_role_value(role_doc, role);
+			}
+		});
+	}
+	get_role_rows() {
+		return this.frm.doc[this.table_fieldname] || [];
+	}
+	get_selected_roles() {
+		return this.get_role_rows().map((row) => this.get_role_value(row));
+	}
+	get_role_value(row) {
+		return row[this.role_fieldname];
+	}
+	set_role_value(row, role) {
+		row[this.role_fieldname] = role;
+	}
+	get_roles() {
+		return {
+			checked_roles: this.multicheck.get_checked_options(),
+			unchecked_roles: this.multicheck.get_unchecked_options(),
+		};
+	}
+};

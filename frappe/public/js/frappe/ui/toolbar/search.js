@@ -1,396 +1,1178 @@
-frappe.provide('frappe.search');
+frappe.provide("frappe.search");
 
-frappe.search.SearchDialog = Class.extend({
-	init: function(opts) {
+/** First N Global Search Settings rows used as implicit default pins. Toolbar shows every pinned DocType. */
+const GLOBAL_SEARCH_VISIBLE_DT_LIMIT = 5;
+const GLOBAL_SEARCH_PIN_STORAGE_KEY = "global-search-pinned-doctypes";
+
+/** “All” summary: per-doctype “Show more” at or above this count when browsing all DocTypes. */
+const GLOBAL_SEARCH_SUMMARY_SHOW_MORE_MIN = 5;
+/** Extra field values beyond this show as “and n more”. */
+const GLOBAL_SEARCH_FIELD_INLINE_PREVIEW_LIMIT = 3;
+
+frappe.search.SearchDialog = class {
+	constructor(opts) {
 		$.extend(this, opts);
 		this.make();
-	},
+	}
 
-	make: function() {
-		var d = new frappe.ui.Dialog();
-		$(d.header).html($(frappe.render_template("search_header")));
-		this.search_dialog = d;
-		this.$search_modal = $(d.$wrapper).addClass('search-dialog');
-		this.$modal_body = $(d.body);
-		this.$input = this.$search_modal.find(".search-input");
+	make() {
+		this.search_dialog = new frappe.ui.Dialog({
+			animate: false,
+			minimizable: true,
+			size: "extra-large",
+			on_page_show: () => this.focus_global_search_input(),
+		});
+		this.set_header();
+		this.$wrapper = $(this.search_dialog.$wrapper).addClass("search-dialog");
+		this.$body = $(this.search_dialog.body);
+		this.$input = this.$wrapper.find(".search-input");
 		this.setup();
-	},
+	}
 
-	setup: function() {
+	/** Header `.search-input` is outside `Dialog.fields_list`; base `focus_on_first_input` skips it. */
+	focus_global_search_input() {
+		const input = this.$input?.get?.(0);
+		if (!input) return;
+		input.focus({ preventScroll: true });
+		if ((input.value || "").length) input.select();
+	}
+
+	set_header() {
+		this.search_dialog.header
+			.addClass("search-header")
+			.find(".title-section")
+			.html(
+				`<div class="input-group text-muted">
+					<input type="text" class="form-control search-input">
+				</div>
+				<span class="search-icon">
+					${frappe.utils.icon("search")}
+				</span>`
+			);
+		const $actions = this.search_dialog.$wrapper.find(".modal-actions");
+		$actions.find(".btn-open-global-search-settings").remove();
+		const $gs = this.make_global_search_settings_btn();
+		if ($gs) {
+			$actions.prepend($gs);
+		}
+	}
+
+	make_global_search_settings_btn() {
+		if (!frappe.model.can_read("Global Search Settings")) return null;
+		const label = __("Configure search settings");
+		return $(
+			`<button type="button" class="btn btn-ghost icon-btn btn-open-global-search-settings">`
+		)
+			.attr({
+				title: label,
+				"aria-label": label,
+			})
+			.append(frappe.utils.icon("settings", "sm"))
+			.on("click", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				this.search_dialog.hide();
+				frappe.set_route("Form", "Global Search Settings", "Global Search Settings");
+			});
+	}
+
+	setup() {
 		this.modal_state = 0;
 		this.current_keyword = "";
 		this.more_count = 20;
 		this.full_lists = {};
 		this.nav_lists = {};
+		this.global_doctype_filter = "";
+		this._global_search_settings_promise = null;
+		this.init_search_objects();
 		this.bind_input();
 		this.bind_events();
-	},
+	}
 
-	update: function($r) {
-		this.$search_modal.find('.loading-state').addClass('hide');
-		this.$modal_body.append($r);
-		if(this.$modal_body.find('.search-results').length > 1) {
-			this.$modal_body.find('.search-results').first().addClass("hide");
+	init_search_objects() {
+		const log_err = (err) => console.error(err);
+		this.searches = {
+			global_search: {
+				input_placeholder: __("Search"),
+				empty_state_text: __("Search for anything"),
+				no_results_status: () => __("No results found"),
+				get_results: (keywords, callback) => {
+					frappe.search.utils
+						.get_global_results(keywords, 0, null, this.global_doctype_filter || "")
+						.then((global_results) => callback(global_results, keywords), log_err);
+				},
+			},
+			tags: {
+				input_placeholder: __("Search"),
+				empty_state_text: __("Search for anything"),
+				no_results_status: (keyword) =>
+					__("No documents found tagged with {0}", [keyword]),
+				get_results: (keywords, callback) => {
+					frappe.tags.utils
+						.get_tag_results(keywords)
+						.then((global_results) => callback(global_results, keywords), log_err);
+				},
+			},
+		};
+	}
+
+	update($r) {
+		this.$wrapper.find(".loading-state").addClass("hide");
+		this.$body.append($r);
+		if (this.$body.find(".search-results").length > 1) {
+			this.$body.find(".search-results").first().addClass("hide");
 			$r.removeClass("hide");
-			this.$modal_body.find('.search-results').first().remove();
+			this.$body.find(".search-results").first().remove();
 		} else {
 			$r.removeClass("hide");
 		}
-	},
+	}
 
-	put_placeholder: function(status_text) {
-		var $placeholder = $('<div class="row search-results hide">' +
-				'<div class="empty-state"><span style="margin-top: -100px">' +
-				'<i class="mega-octicon octicon-telescope status-icon">' +
-				'<i class="fa fa-square cover twinkle-one hide" style="left:0px;"></i>'+
-				'<i class="fa fa-square cover twinkle-two hide" style="left:8px; top:5px;"></i>'+
-				'<i class="fa fa-square cover twinkle-three hide" style="left:13px; top:-3px;"></i></i>'+
-				'<p>' + status_text + '</p></span></div>' +
-			'</div>');
-		this.update($placeholder);
-	},
-
-	bind_input: function() {
-		var me = this;
-		this.$input.on("input", function() {
-			var $this = $(this);
-			clearTimeout($this.data('timeout'));
-			$this.data('timeout', setTimeout(function() {
-				if(me.$input.val() === me.current_keyword) return;
-				var keywords = me.$input.val();
-				if(keywords.length > 1) {
-					me.get_results(keywords);
-				} else {
-					me.current_keyword = "";
-					me.put_placeholder(me.search.empty_state_text);
-				}
-			}, 300));
+	put_placeholder(status_text) {
+		let $shell = $(frappe.render_template("search")).addClass("hide");
+		const show_tips =
+			status_text === __("Search for anything") &&
+			this.search === this.searches["global_search"];
+		const $empty = frappe.ui.empty_state({
+			icon: "search",
+			title: status_text,
+			// get_results looks for this to tell the placeholder from results
+			css_class: "search-empty-state",
 		});
-	},
-
-	bind_events: function() {
-		var me = this;
-
-		// Sidebar
-		this.$modal_body.on('click', '.list-link',  function() {
-			var link = $(this);
-			me.$modal_body.find('.search-sidebar').find(".list-link").removeClass("active select");
-			link.addClass("active select");
-			var type = link.attr('data-category');
-			me.$modal_body.find('.results-area').empty().html(me.full_lists[type]);
-			me.$modal_body.find('.module-section-link').first().focus();
-			me.current_type = type;
-		});
-
-		// Summary more links
-		this.$modal_body.on('click', '.section-more', function() {
-			var type = $(this).attr('data-category');
-			me.$modal_body.find('.search-sidebar').find('*[data-category="'+ type +'"]').trigger('click');
-		});
-
-		// Back-links (mobile-view)
-		this.$modal_body.on('click', '.all-results-link', function() {
-			me.$modal_body.find('.search-sidebar').find('*[data-category="All Results"]').trigger('click');
-		});
-
-		// Full list more links
-		this.$modal_body.on('click', '.list-more', function() {
-			var type = $(this).attr('data-category');
-			var fetch_type = $(this).attr('data-search');
-			var current_count = me.$modal_body.find('.result').length;
-			if(fetch_type === "Global") {
-				frappe.search.utils.get_global_results(me.current_keyword,
-					current_count, me.more_count, type)
-					.then(function(doctype_results) {
-						me.add_more_results(doctype_results);
-					}, function (err) {
-						console.error(err);
-					});
+		if (show_tips) {
+			const esc = frappe.utils.escape_html;
+			const example = (text) => " (" + __("e.g.") + " " + text + ")";
+			const shortcut = frappe.utils.is_mac() ? "⌘K" : "Ctrl+K";
+			$empty.append(
+				`<div class="flex flex-col items-center gap-1 text-p-sm text-ink-gray-5">
+					<p class="mb-0">${esc(__("Use ampersand to match multiple terms") + example("Marie&John"))}</p>
+					<p class="mb-0">${esc(__("Start with # to search by tag") + example("#urgent"))}</p>
+					<p class="mb-0">
+						<span class="px-1 rounded bg-surface-gray-2 text-ink-gray-7">${shortcut}</span>
+						${esc(__("to open Awesome Bar"))}
+					</p>
+				</div>`
+			);
+		}
+		$shell.find(".results-area").html($empty);
+		this.update($shell);
+		this.sync_global_search_filter_bar();
+	}
+	/** Binds input event to the search input and debounces the search input. */
+	bind_input() {
+		const wait_ms = 300;
+		this._debounced_search_input = frappe.utils.debounce(() => {
+			if (this.$input.val() === this.current_keyword) return;
+			const keywords = this.$input.val();
+			if (keywords.length > 1) {
+				this.get_results(keywords);
 			} else {
-				var results = me.nav_lists[type].slice(0, me.more_count);
-				me.nav_lists[type].splice(0, me.more_count);
-				me.add_more_results([{title: type, results: results}]);
+				this.current_keyword = "";
+				this.global_doctype_filter = "";
+				this.put_placeholder(this.search.empty_state_text);
+			}
+		}, wait_ms);
+		this.$input.on("input", () => this._debounced_search_input());
+		this.$wrapper.on("hide.bs.modal.globalSearch", () => {
+			this._debounced_search_input?.cancel?.();
+		});
+	}
+
+	/** Click handlers for search UI: sidebar sections, DocType filters/pins, “More” / pagination, and tag→global switch. */
+	bind_events() {
+		/** Sidebar navigation: click a section link to show its results. */
+		this.$body.on("click", ".list-link", (e) => {
+			const $link = $(e.currentTarget);
+			this.$body.find(".search-sidebar").find(".list-link").removeClass("active selected");
+			$link.addClass("active selected");
+			const type = $link.attr("data-category");
+			this.$body.find(".results-area").empty().html(this.full_lists[type]);
+			this.$body.find(".module-section-link").first().focus();
+		});
+
+		/** “Show more” links: global search or DocType-specific “More”. */
+		this.$body.on("click", ".section-more", (e) => {
+			e.preventDefault();
+			const $btn = $(e.currentTarget);
+			const type = $btn.attr("data-category");
+			if ($btn.attr("data-fetch-type") === "Global") {
+				const $section = $btn.closest(".result-section.global-summary");
+				const $list = $section.find(".global-search-results-list").first();
+				const current_count = Math.max(
+					0,
+					$list.children(".list-row-container").length - 1
+				);
+				frappe.search.utils
+					.get_global_results(
+						this.current_keyword,
+						current_count,
+						this.more_count,
+						type || ""
+					)
+					.then(
+						(doctype_results) => {
+							if (doctype_results.length) {
+								this.add_more_global_table_rows(
+									type,
+									doctype_results,
+									$btn,
+									$list
+								);
+								const total = Math.max(
+									0,
+									$list.children(".list-row-container").length - 1
+								);
+								const word = total === 1 ? __("result") : __("results");
+								$section
+									.find(".result-title")
+									.text(__(type) + " (" + total + " " + word + ")");
+							} else {
+								$btn.hide();
+							}
+						},
+						(err) => console.error(err)
+					);
+				return;
+			}
+			this.$body.find(".search-sidebar").find(`*[data-category="${type}"]`).trigger("click");
+		});
+
+		/** DocType filter pills: apply DocType filter and show its results. */
+		this.$body.on("click", ".global-search-filter-pill", (e) => {
+			e.stopPropagation();
+			this.apply_global_doctype_filter($(e.currentTarget).attr("data-doctype") || "");
+		});
+
+		this.$wrapper.on("click", (e) => {
+			if (!$(e.target).closest(".global-search-more-dropdown-wrap").length)
+				this.close_global_search_more_menus();
+		});
+
+		this.$body.on("click", ".global-search-more-trigger", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const $trigger = $(e.currentTarget);
+			const $dd = $trigger.siblings(".global-search-more-dropdown");
+			const opening = !$dd.hasClass("menu-open");
+			this.close_global_search_more_menus();
+			if (opening) {
+				$dd.addClass("menu-open");
+				this.align_global_search_more_dropdown($dd, $trigger);
 			}
 		});
 
-		// Switch to global search link
-		this.$modal_body.on('click', '.switch-to-global-search', function() {
-			me.search = me.searches['global_search'];
-			me.$input.attr("placeholder", me.search.input_placeholder);
-			me.put_placeholder(me.search.empty_state_text);
-			me.get_results(me.current_keyword);
+		this.$body.on("click", ".global-search-more-dropdown", (e) => e.stopPropagation());
+
+		/** DocType selection from “More” dropdown: apply DocType filter and close dropdown. */
+		this.$body.on("click", ".global-search-dd-pick-doctype", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.close_global_search_more_menus();
+			this.apply_global_doctype_filter($(e.currentTarget).attr("data-doctype") || "");
 		});
 
-		// Help results
-		this.$modal_body.on('click', 'a[data-path]', frappe.help.show_results);
-		this.bind_keyboard_events();
-	},
+		/** DocType pin buttons: toggle DocType pin state and sync filter bar. */
+		this.$body.on("click", ".global-search-pin-btn", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const $btn = $(e.currentTarget);
+			const dt = $btn.attr("data-doctype");
+			const action = $btn.attr("data-pin-action") || "";
+			if (!dt) return;
+			if (action === "remove") this.remove_global_search_pin(dt);
+			else if (action === "add") this.add_global_search_pin(dt);
+			this.sync_global_search_filter_bar();
+		});
 
-	bind_keyboard_events: function() {
-		var me = this;
-		this.$search_modal.on('keydown', function(e) {
+		/** Back-links (mobile-view): click to show all results. */
+		this.$body.on("click", ".all-results-link", () => {
+			this.$body
+				.find(".search-sidebar")
+				.find('*[data-category="All Results"]')
+				.trigger("click");
+		});
 
-			if(me.$modal_body.find('.list-link').length > 1) {
-				if(me.modal_state === 0) {
-					// DOWN and UP keys navigate sidebar
-					var { UP_ARROW, DOWN_ARROW, TAB } = frappe.ui.keyCode;
-					if(e.which === DOWN_ARROW || e.which === TAB) {
-						e.preventDefault();
-						var $link = me.$modal_body.find('.list-link.select').next();
-						if($link.length > 0) {
-							// me.$modal_body.find('.list-link').removeClass('select');
-							// $link.addClass('select');
-							$link.trigger('click');
+		/** Full list “More” buttons: fetch more results from the current DocType. */
+		this.$body.on("click", ".list-more", (e) => {
+			e.preventDefault();
+			const $trigger = $(e.currentTarget);
+			const type = $trigger.attr("data-category");
+			const fetch_type = $trigger.attr("data-search");
+			const $panel = $trigger.closest(".global-search-table-panel");
+			const $list = $panel.find(".global-search-results-list").first();
+			var current_count = $list.length
+				? Math.max(0, $list.children(".list-row-container").length - 1)
+				: this.$body.find(".result").length;
+			if (fetch_type === "Global") {
+				frappe.search.utils
+					.get_global_results(
+						this.current_keyword,
+						current_count,
+						this.more_count,
+						this.global_doctype_filter || type
+					)
+					.then(
+						(doctype_results) => {
+							if (doctype_results.length) {
+								this.add_more_global_table_rows(
+									type,
+									doctype_results,
+									$trigger,
+									$list
+								);
+							} else {
+								$trigger.hide();
+							}
+						},
+						(err) => {
+							console.error(err);
 						}
-					} else if(e.which === UP_ARROW) {
-						e.preventDefault();
-						var $link = me.$modal_body.find('.list-link.select').prev();
-						if($link.length > 0) {
-							$link.trigger('click');
-						}
-					}
-				}
-			}
-
-			if(!me.$input.is(":focus")) {
-				me.$input.focus();
+					);
+			} else {
+				let results = this.nav_lists[type].slice(0, this.more_count);
+				this.nav_lists[type].splice(0, this.more_count);
+				this.add_more_results([{ title: type, results: results }]);
 			}
 		});
 
-	},
+		// Switch to global search link (keeps existing DocType toolbar filter).
+		this.$body.on("click", ".switch-to-global-search", () => {
+			this.search = this.searches["global_search"];
+			this.$input.attr("placeholder", this.search.input_placeholder);
+			this.put_placeholder(this.search.empty_state_text);
+			this.get_results(this.current_keyword);
+		});
+	}
 
-	init_search: function(keywords, search_type) {
-		var me = this;
-		this.search = this.searches[search_type];
-		this.$input.attr("placeholder", this.search.input_placeholder);
-		this.put_placeholder(this.search.empty_state_text);
-		this.get_results(keywords);
+	init_search(keywords, search_type) {
+		keywords = (keywords || "").trim();
+		this._reset_global_search_modal_mode(search_type);
 		this.search_dialog.show();
 		this.$input.val(keywords);
-		setTimeout(function() { me.$input.select(); }, 500);
-	},
-
-	get_results: function(keywords) {
-		this.current_keyword = keywords;
-		if(this.$modal_body.find('.empty-state').length > 0) {
-			this.put_placeholder(__("Searching ..."));
-			this.$modal_body.find('.cover').removeClass('hide')
+		if (keywords.length > 1) {
+			this.get_results(keywords);
 		} else {
-			this.$search_modal.find('.loading-state').removeClass('hide');
+			this.current_keyword = keywords;
+			this.put_placeholder(this.search.empty_state_text);
 		}
-		this.search.get_results(keywords, this.parse_results.bind(this));
-	},
+	}
 
-	parse_results: function(result_sets, keyword) {
-		result_sets = result_sets.filter(function(set) {
+	/** Keyboard shortcut: open full Global Search panel (not the Awesome Bar). */
+	open_global_search_dialog(keywords) {
+		keywords = (keywords || "").trim();
+		this._reset_global_search_modal_mode("global_search");
+		this.search_dialog.show();
+		this.$input.val(keywords);
+		if (keywords.length > 1) {
+			this.get_results(keywords);
+		} else {
+			this.current_keyword = keywords;
+			this.put_placeholder(this.search.empty_state_text);
+		}
+	}
+
+	toggle_global_search_dialog(keywords) {
+		if (this.search_dialog.display) {
+			this.search_dialog.hide();
+		} else {
+			this.open_global_search_dialog(keywords);
+		}
+	}
+
+	get_results(keywords) {
+		this.current_keyword = keywords;
+		if (this.$body.find(".search-empty-state").length > 0) {
+			this.put_placeholder(__("Searching ..."));
+		} else {
+			this.$wrapper.find(".loading-state").removeClass("hide");
+		}
+
+		if (this.current_keyword.charAt(0) === "#") {
+			this.global_doctype_filter = "";
+			this.search = this.searches["tags"];
+		} else {
+			this.search = this.searches["global_search"];
+		}
+
+		this.search.get_results(keywords, this.parse_results.bind(this));
+	}
+
+	parse_results(result_sets, keyword) {
+		result_sets = result_sets.filter(function (set) {
 			return set.results.length > 0;
-		})
-		if(result_sets.length > 0) {
+		});
+		if (result_sets.length > 0) {
 			this.render_data(result_sets);
 		} else {
 			this.put_placeholder(this.search.no_results_status(keyword));
 		}
-	},
+	}
 
-	render_data: function(result_sets) {
-		var me = this;
-		var $search_results = $(frappe.render_template("search")).addClass('hide');
-		var $sidebar = $search_results.find(".search-sidebar").empty();
-		var sidebar_item_html = '<li class="module-sidebar-item list-link" data-category="{0}">' +
-			'<a><span class="ellipsis">{0}</span><i class="octicon octicon-chevron-right"' +
-			'></a></li>';
+	render_data(result_sets) {
+		let $search_results = $(frappe.render_template("search")).addClass("hide");
+		let $sidebar = $search_results.find(".search-sidebar").empty();
+		let sidebar_item_html =
+			'<li class="search-sidebar-item standard-sidebar-item list-link" data-category="{0}">' +
+			'<a><span class="ellipsis">{1}</span></a></li>';
 
 		this.modal_state = 0;
-		this.full_lists = {	'All Results': $('<div class="module-body results-summary"></div>') };
+		this.full_lists = {
+			"All Results": $('<div class="results-summary"></div>'),
+		};
 		this.nav_lists = {};
 
-		result_sets.forEach(function(set) {
-			$sidebar.append($(__(sidebar_item_html, [set.title])));
-			me.add_section_to_summary(set.title, set.results);
-			me.full_lists[set.title] = me.render_full_list(set.title, set.results, set.fetch_type);
+		let global_nonempty = [];
+		let nav_nonempty = [];
+		result_sets.forEach((set) => {
+			if (set.results.length === 0) return;
+			if (set.fetch_type === "Global") {
+				global_nonempty.push(set);
+			} else {
+				nav_nonempty.push(set);
+			}
 		});
 
-		if(result_sets.length > 1) {
-			$sidebar.prepend($(__(sidebar_item_html, ["All Results"])));
+		const prepend_all = global_nonempty.length >= 1 || nav_nonempty.length > 1;
+
+		if (prepend_all) {
+			$sidebar.prepend($($.format(sidebar_item_html, ["All Results", __("All Results")])));
 		}
 
-		this.update($search_results.clone());
-		this.$modal_body.find('.list-link').first().trigger('click');
-	},
+		const register_sidebar_section = (set, with_sidebar_entry) => {
+			if (with_sidebar_entry) {
+				$sidebar.append($($.format(sidebar_item_html, [set.title, __(set.title)])));
+			}
+			this.add_section_to_summary(set.title, set.results, set.fetch_type);
+			this.full_lists[set.title] = this.render_full_list(
+				set.title,
+				set.results,
+				set.fetch_type
+			);
+		};
 
-	render_full_list: function(type, results, fetch_type) {
-		var me = this, max_length = 20;
-		var $results_list = $(' <div class="module-body"><div class="row module-section full-list '+
-			type+'-section">'+'<div class="col-sm-12 module-section-column">' +
-			'<div class="back-link"><a class="all-results-link small"> All Results</a></div>' +
-			'<div class="h4 section-head">'+type+'</div>' +
-			'<div class="section-body"></div></div></div></div>');
+		nav_nonempty.forEach((set) => register_sidebar_section(set, true));
+		global_nonempty.forEach((set) => register_sidebar_section(set, false));
 
-		var $results_col = $results_list.find('.module-section-column');
-		for(var i = 0; i < max_length && results.length > 0; i++) {
-			$results_col.append(me.render_result(type, results.shift()));
+		const show_global_filters = this.search !== this.searches["tags"];
+
+		const finish_draw = () => {
+			this.update($search_results);
+			const $pill_host = $(this.search_dialog.body).find(".global-search-doctype-filters");
+			this.toggle_global_search_filters($pill_host, show_global_filters);
+			if (show_global_filters) {
+				this.render_doctype_filter_bar_into($pill_host);
+			}
+			$(this.search_dialog.body).find(".list-link").first().trigger("click");
+		};
+
+		if (show_global_filters) {
+			this.ensure_global_search_allowed_doctypes().then(() => finish_draw());
+		} else {
+			finish_draw();
 		}
-		if(results.length > 0) {
-			if(fetch_type === "Nav") this.nav_lists[type] = results;
-			$results_col.append('<a class="list-more small" data-search="'+ fetch_type +
-				'" data-category="'+ type + '" data-count="' + max_length +
-				'" style="margin-top:10px">'+__("More...")+'</a>');
+	}
+
+	/** Syncs DocType filter bar: shows/hides based on current search mode (global vs. per-DocType). */
+	sync_global_search_filter_bar() {
+		if (this.search === this.searches["tags"]) {
+			const $pill_host = this.$body.find(".global-search-doctype-filters");
+			this.toggle_global_search_filters($pill_host, false);
+			return;
+		}
+		const redraw = () => {
+			const $pill_host = this.$body.find(".global-search-doctype-filters");
+			this.toggle_global_search_filters($pill_host, true);
+			this.render_doctype_filter_bar_into($pill_host);
+		};
+		/** Promise `.then` runs on a microtask — pin/unpin would update one frame late. */
+		if (this._cached_global_search_allowed !== undefined) {
+			redraw();
+			return;
+		}
+		this.ensure_global_search_allowed_doctypes().then(redraw);
+	}
+
+	/** Toggles visibility of the DocType filter bar: shows/hides based on current search mode (global vs. per-DocType). */
+	toggle_global_search_filters($host, visible) {
+		if (visible) {
+			$host.removeClass("hide");
+		} else {
+			$host.empty().addClass("hide");
+		}
+	}
+
+	/** Applies a DocType filter: updates the global_doctype_filter and fetches results. */
+	apply_global_doctype_filter(dt) {
+		this.global_doctype_filter = dt || "";
+		this.get_results(this.current_keyword);
+	}
+
+	/** Clears DocType filter and switches modal to `global_search` or `tags` mode. */
+	_reset_global_search_modal_mode(search_type) {
+		this.global_doctype_filter = "";
+		this.search = this.searches[search_type];
+		this.$input.attr("placeholder", this.search.input_placeholder);
+	}
+
+	/** Shared navigation for list/global rows and classic result tiles (route + stale-hash reroute). */
+	_open_search_result_route(result) {
+		if (!result.route) return;
+		if (result.route_options) {
+			frappe.route_options = result.route_options;
+		}
+		const previous_hash = window.location.hash;
+		frappe.set_route(result.route);
+		if (window.location.hash === previous_hash) {
+			frappe.router.route();
+		}
+	}
+
+	/** Closes the “More” dropdown menus: removes the `menu-open` class from the dropdown. */
+	close_global_search_more_menus() {
+		this.$wrapper.find(".global-search-more-dropdown").removeClass("menu-open align-right");
+	}
+
+	align_global_search_more_dropdown($dropdown, $trigger) {
+		const apply = () => {
+			const b = $trigger[0].getBoundingClientRect();
+			const c = this.$wrapper[0].getBoundingClientRect();
+			const left_edge = Math.max(c.left, 8);
+			const right_edge = Math.min(c.right, window.innerWidth) - 8;
+			const w =
+				$dropdown.get(0).getBoundingClientRect().width ||
+				$dropdown.outerWidth() ||
+				Math.min(384, window.innerWidth * 0.92);
+			const fits_opening_right = b.left + w <= right_edge;
+			const fits_opening_left = b.right - w >= left_edge;
+			let align_right = false;
+			if (!fits_opening_right && fits_opening_left) {
+				align_right = true;
+			} else if (!fits_opening_right && !fits_opening_left) {
+				align_right = b.right - left_edge > right_edge - b.left;
+			}
+			$dropdown.toggleClass("align-right", align_right);
+		};
+		apply();
+		requestAnimationFrame(apply);
+	}
+
+	/** Returns a set of allowed DocTypes for Global Search: based on Global Search Settings. */
+	_global_search_allowed_set() {
+		const allow = Object.create(null);
+		for (const d of this._cached_global_search_allowed || []) if (d) allow[d] = 1;
+		return allow;
+	}
+
+	/** Ensures the Global Search Settings are loaded and cached: fetches from the server if needed. */
+	ensure_global_search_allowed_doctypes() {
+		if (!this._global_search_settings_promise) {
+			this._global_search_settings_promise = new Promise((resolve) => {
+				/** Fetches the Global Search Settings from the server and caches the results. */
+				frappe.call({
+					method: "frappe.client.get",
+					args: {
+						doctype: "Global Search Settings",
+						name: "Global Search Settings",
+					},
+					callback: (res) => {
+						/** If the Global Search Settings are loaded successfully, cache the results. */
+						if (!res.exc && res.message && res.message.allowed_in_global_search) {
+							const rows = (res.message.allowed_in_global_search || []).slice();
+							rows.sort(
+								(a, b) => (parseInt(a.idx, 10) || 0) - (parseInt(b.idx, 10) || 0)
+							);
+							this._cached_global_search_allowed = rows
+								.map((row) => row.document_type)
+								.filter(Boolean);
+						} else {
+							this._cached_global_search_allowed = [];
+						}
+						resolve(this._cached_global_search_allowed);
+					},
+					error: () => {
+						this._cached_global_search_allowed = [];
+						resolve([]);
+					},
+				});
+			});
+		}
+		return this._global_search_settings_promise;
+	}
+
+	/**
+	 * Reads the global search pin state from localStorage.
+	 */
+	read_global_search_pin_state() {
+		const key = GLOBAL_SEARCH_PIN_STORAGE_KEY;
+		/** Reads the global search pin state from localStorage. */
+		let raw = null;
+		try {
+			raw = localStorage.getItem(key);
+		} catch (_) {
+			raw = null;
+		}
+		if (raw === null) {
+			try {
+				const u = frappe.session && frappe.session.user ? frappe.session.user : "guest";
+				const legacy_key = "frappe_global_search_pins::" + encodeURIComponent(u);
+				const legacy_val = localStorage.getItem(legacy_key);
+				if (legacy_val !== null) {
+					localStorage.setItem(key, legacy_val);
+					localStorage.removeItem(legacy_key);
+					raw = legacy_val;
+				}
+			} catch (_) {
+				/* ignore */
+			}
+		}
+		if (raw === null) return { explicit: false, pins: [] };
+		try {
+			let arr = JSON.parse(raw);
+			if (!Array.isArray(arr)) return { explicit: true, pins: [] };
+			return { explicit: true, pins: arr.filter((d) => !!d) };
+		} catch {
+			return { explicit: true, pins: [] };
+		}
+	}
+
+	/** Writes the global search pin state to localStorage. */
+	write_global_search_pins(pins) {
+		const uniq = [];
+		const seen = {};
+		(pins || []).forEach(function (dt) {
+			if (!dt || seen[dt]) return;
+			seen[dt] = 1;
+			uniq.push(dt);
+		});
+		try {
+			localStorage.setItem(GLOBAL_SEARCH_PIN_STORAGE_KEY, JSON.stringify(uniq));
+		} catch (e) {
+			/* quota or private mode */
+		}
+	}
+
+	/** Returns the default pinned DocTypes: based on Global Search Settings. */
+	default_pinned_doctypes_from_settings() {
+		const allowed = this._cached_global_search_allowed || [];
+		const lim = GLOBAL_SEARCH_VISIBLE_DT_LIMIT;
+		return allowed.slice(0, Math.min(lim, allowed.length));
+	}
+
+	/** Returns the current effective list of pinned DocTypes: based on Global Search Settings and localStorage. */
+	current_effective_pins_list() {
+		const allow = this._global_search_allowed_set();
+		const st = this.read_global_search_pin_state();
+		const base = !st.explicit ? this.default_pinned_doctypes_from_settings() : st.pins;
+		return base.filter((d) => allow[d]);
+	}
+
+	/** Adds a DocType to the pinned list: updates localStorage. */
+	add_global_search_pin(dt) {
+		const allow = this._global_search_allowed_set();
+		if (!dt || !allow[dt]) return;
+
+		const st = this.read_global_search_pin_state();
+		let next = !st.explicit
+			? this.default_pinned_doctypes_from_settings().filter((d) => allow[d])
+			: st.pins.filter((d) => allow[d]).slice();
+		if (next.indexOf(dt) === -1) next.push(dt);
+		this.write_global_search_pins(next);
+	}
+
+	/** Removes a DocType from the pinned list: updates localStorage. */
+	remove_global_search_pin(dt) {
+		const allow = this._global_search_allowed_set();
+		const st = this.read_global_search_pin_state();
+		const next = !st.explicit
+			? this.default_pinned_doctypes_from_settings().filter((d) => allow[d] && d !== dt)
+			: st.pins.filter((d) => allow[d] && d !== dt);
+		this.write_global_search_pins(next);
+	}
+
+	/** Builds the DOM for the “More” dropdown menu: shows pinned and unpinned DocTypes. */
+	build_global_search_more_menu_dom(pinned_ordered, unpinned_ordered) {
+		const pin_icon = frappe.utils.icon("pin", "xs");
+		const unpin_icon = frappe.utils.icon("pin-off", "xs");
+		let html = "";
+		const row = (dt, label, action) => {
+			const esc = frappe.utils.escape_html(dt || "");
+			const safe_label = frappe.utils.escape_html(label || dt || "");
+			let pin_btn = "";
+			if (action === "unpin") {
+				pin_btn = `<button type="button" class="btn btn-xs btn-default global-search-pin-btn" data-pin-action="remove" data-doctype="${esc}" title="${__(
+					"Unpin"
+				)}" aria-label="${__("Unpin")}">${unpin_icon}</button>`;
+			} else if (action === "pin") {
+				pin_btn = `<button type="button" class="btn btn-xs btn-default global-search-pin-btn" data-pin-action="add" data-doctype="${esc}" title="${__(
+					"Pin"
+				)}" aria-label="${__("Pin")}">${pin_icon}</button>`;
+			}
+			return `<div class="global-search-more-row">
+				<button type="button" class="btn btn-xs btn-link global-search-dd-pick-doctype ellipsis" data-doctype="${esc}">${safe_label}</button>
+				<div class="global-search-pin-cell">${pin_btn}</div>
+			</div>`;
+		};
+
+		html += `<div class="global-search-more-group"><div class="global-search-more-group-title">${__(
+			"Pinned"
+		)}</div>`;
+		if (pinned_ordered.length) {
+			pinned_ordered.forEach((dt) => {
+				html += row(dt, __(dt), "unpin");
+			});
+		} else {
+			html += `<div class="global-search-more-empty text-muted">${__(
+				"No pinned document types."
+			)}</div>`;
+		}
+		html += `</div><div class="global-search-more-group"><div class="global-search-more-group-title">${__(
+			"Other"
+		)}</div>`;
+		if (unpinned_ordered.length) {
+			unpinned_ordered.forEach((dt) => {
+				html += row(dt, __(dt), "pin");
+			});
+		} else {
+			html += `<div class="global-search-more-empty text-muted">${__(
+				"No other document types."
+			)}</div>`;
+		}
+		html += "</div>";
+		return html;
+	}
+
+	/** Renders the DocType filter bar into the host element: shows pinned and unpinned DocTypes. */
+	render_doctype_filter_bar_into($host) {
+		const keep_more_dropdown_open =
+			$host.find(".global-search-more-dropdown.menu-open").length > 0;
+
+		const dt_allowed = this._cached_global_search_allowed || [];
+		let pinned_matching = this.current_effective_pins_list();
+		let unpinned_ordered = dt_allowed.filter((dt) => !pinned_matching.includes(dt));
+		/** One chip per pinned DocType (strip wraps); not capped here. */
+		let visible_doctypes = pinned_matching.slice();
+		let active_dt = this.global_doctype_filter || "";
+		/** Selected DocType must appear in the toolbar if it is not among the visible chips. */
+		let show_overflow_chip =
+			!!active_dt &&
+			dt_allowed.indexOf(active_dt) !== -1 &&
+			visible_doctypes.indexOf(active_dt) === -1;
+
+		let $toolbar = $('<div class="global-search-filter-toolbar">');
+		let $strip = $('<div class="global-search-visible-pills">');
+
+		let add_pill = (lbl, dt, extra_cls = "") =>
+			$("<button>")
+				.attr({ type: "button", "data-doctype": dt || "", title: lbl })
+				.addClass(
+					"btn btn-xs btn-default global-search-filter-pill ellipsis" +
+						(extra_cls ? " " + extra_cls : "")
+				)
+				.text(lbl)
+				.toggleClass("active", (active_dt || "") === (dt || ""));
+
+		$strip.append(add_pill(__("All"), ""));
+		visible_doctypes.forEach((dt) => {
+			$strip.append(add_pill(__(dt), dt, ""));
+		});
+
+		if (show_overflow_chip) {
+			$strip.append(
+				add_pill(__(active_dt), active_dt, "global-search-filter-overflow-pick")
+			);
+		}
+
+		let $more_wrap = $('<div class="global-search-more-dropdown-wrap">');
+		let $more_btn = $(
+			'<button type="button" class="btn btn-xs btn-default global-search-more-trigger">'
+		)
+			.append(frappe.utils.icon("menu", "xs"))
+			.append($('<span class="global-search-more-label">').text(" " + __("More")));
+		let $dropdown = $('<div class="global-search-more-dropdown shadow rounded">').html(
+			this.build_global_search_more_menu_dom(pinned_matching, unpinned_ordered)
+		);
+
+		if (pinned_matching.length + unpinned_ordered.length > 0) {
+			$more_wrap.append($more_btn).append($dropdown);
+			$strip.append($more_wrap);
+			if (keep_more_dropdown_open) {
+				$dropdown.addClass("menu-open");
+				this.align_global_search_more_dropdown($dropdown, $more_btn);
+			}
+		}
+
+		$toolbar.append($strip);
+
+		let $toolbar_row = $('<div class="global-search-toolbar-row">');
+		$toolbar_row.append($toolbar);
+		$host.empty().append($toolbar_row);
+	}
+
+	/** Builds the DOM for the global search table panel: shows the results in a table. */
+	build_global_search_table_panel(doctype, results_slice, keywords, options = {}) {
+		const cols = frappe.search.utils.global_search_field_columns_for_results(results_slice);
+		const max_rows = options.max_rows == null ? results_slice.length : options.max_rows;
+		let $panel = $('<div class="global-search-table-panel">');
+		let $list = $("<div>")
+			.addClass("list-item-table global-search-results-list mb-0")
+			.attr("data-doctype", doctype || "");
+
+		const nameLabel = __("Name");
+		const name_head = frappe.utils.escape_html(nameLabel);
+		let header_cols_html = `
+			<div class="list-row-col ellipsis list-subject level global-search-grid-col global-search-list-head-subject">
+				<span class="level-item" title="${name_head}">${nameLabel}</span>
+			</div>`;
+		for (let c = 0; c < cols.length; c++) {
+			const ch = frappe.utils.escape_html(cols[c]);
+			header_cols_html += `<div class="list-row-col ellipsis global-search-grid-col"><span title="${ch}">${ch}</span></div>`;
+		}
+		$list.append(
+			`<div class="list-row-container global-search-list-header">
+				<header class="level list-row-head text-muted">
+					<div class="level-left list-header-subject global-search-level-left-multi">
+						${header_cols_html}
+					</div>
+				</header>
+			</div>`
+		);
+
+		results_slice
+			.slice(0, max_rows)
+			.forEach((r) => this.append_global_result_list_row(r, cols, keywords, doctype, $list));
+		$panel.append($list);
+		return $panel;
+	}
+
+	/** Appends a row to the global search table panel: shows the result in a table. */
+	append_global_result_list_row(result, columns, keywords, type, $list) {
+		const utils = frappe.search.utils;
+		const fields = utils.parse_global_search_fields(result._global_raw_content || "");
+		let avatar_html = "";
+		if (result.image) {
+			avatar_html = frappe.get_avatar("avatar-small", result.label, result.image);
+		}
+		let route_url = "#";
+		if (result.route) {
+			route_url = frappe.router.make_url(result.route);
+		}
+		const $name_link = $('<a class="global-search-name-link ellipsis">')
+			.attr("href", route_url)
+			.html(utils.highlight_global_search_terms(result.label, keywords));
+
+		$name_link.attr("title", result.label);
+		$name_link.on("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this._open_search_result_route(result);
+		});
+
+		let $name_inner = $('<div class="global-search-name-cell-inner">');
+		if (avatar_html) {
+			$name_inner.append($(avatar_html));
+		}
+		$name_inner.append($name_link);
+		const show_doc_name = result.value !== result.label;
+		if (show_doc_name) {
+			$name_inner.append(
+				$('<span class="text-muted">').html(
+					utils.highlight_global_search_terms(result.value, keywords)
+				)
+			);
+		}
+
+		let $subject = $(
+			'<div class="list-row-col ellipsis list-subject level global-search-grid-col">'
+		);
+		const subject_title = show_doc_name ? `${result.label}\n${result.value}` : result.label;
+		$subject.attr("title", subject_title);
+		$subject.append($('<span class="level-item">').append($name_inner));
+
+		const field_value_parts = (raw) => {
+			if (raw == null) return [""];
+			if (Array.isArray(raw)) return raw.map((p) => String(p));
+			return [String(raw)];
+		};
+
+		let $level_left = $('<div class="level-left global-search-level-left-multi">').append(
+			$subject
+		);
+		const row_title_bits = [subject_title];
+		const previewLim = GLOBAL_SEARCH_FIELD_INLINE_PREVIEW_LIMIT;
+		for (let i = 0; i < columns.length; i++) {
+			const parts = field_value_parts(fields[columns[i]]);
+			const total = parts.length;
+			const plain_full = parts.join("\n");
+			row_title_bits.push(plain_full);
+
+			let innerHtml = "";
+			if (total > previewLim) {
+				const head = parts.slice(0, previewLim);
+				const moreN = total - previewLim;
+				const moreLbl = __("and {0} more", [String(moreN)]);
+				const tailHint = ` <span class="global-search-field-more-hint">${frappe.utils.escape_html(
+					moreLbl
+				)}</span>`;
+				const linesBeforeLast = head.slice(0, -1);
+				const lastPreview = head[previewLim - 1];
+				const lastLineHtml =
+					utils.highlight_global_search_terms(lastPreview, keywords) + tailHint;
+				innerHtml =
+					linesBeforeLast.length > 0
+						? linesBeforeLast
+								.map((p) => utils.highlight_global_search_terms(p, keywords))
+								.join("<br>") +
+						  "<br>" +
+						  lastLineHtml
+						: lastLineHtml;
+			} else {
+				innerHtml = parts
+					.map((p) => utils.highlight_global_search_terms(p, keywords))
+					.join("<br>");
+			}
+
+			const multiline = total > 1 || total > previewLim || plain_full.indexOf("\n") !== -1;
+			let $field_col = $(
+				'<div class="list-row-col global-search-field-col global-search-grid-col">'
+			);
+			if (multiline) {
+				$field_col.addClass("global-search-field-col--multiline");
+			} else {
+				$field_col.addClass("ellipsis");
+			}
+			$field_col.html(innerHtml).attr("title", plain_full);
+			$level_left.append($field_col);
+		}
+
+		let $row = $('<div class="level list-row">').append($level_left);
+		let $container = $('<div class="list-row-container">')
+			.attr("title", row_title_bits.filter(Boolean).join("\n"))
+			.append($row);
+		$list.append($container);
+	}
+
+	/** Renders the full list: shows the results in a table. */
+	render_full_list(type, results, fetch_type) {
+		let max_length = fetch_type === "Global" ? 100 : 20;
+
+		let $results_list = $(`<div class="results-summary">
+			<div class="result-section full-list ${type}-section col-sm-12">
+				<div class="result-title"> ${__(type)}</div>
+				<div class="result-body">
+				</div>
+			</div>
+		</div>`);
+
+		if (fetch_type === "Global") {
+			const $panel = this.build_global_search_table_panel(
+				type,
+				results,
+				this.current_keyword,
+				{
+					max_rows: max_length,
+				}
+			);
+			$results_list.find(".result-body").append($panel);
+			if (results.length > 0) {
+				const cat_esc = frappe.utils.escape_html(type || "");
+				$(`<button type="button" class="btn btn-default btn-xs mt-2 list-more" data-search="Global" data-category="${cat_esc}">
+					${__("More")}
+				</button>`).appendTo($panel);
+			}
+		} else {
+			results.slice(0, max_length).forEach((result) => {
+				$results_list.find(".result-body").append(this.render_result(type, result));
+			});
+		}
+
+		if (results.length > 0) {
+			if (fetch_type === "Nav") this.nav_lists[type] = results;
+
+			if (fetch_type !== "Global" && results.length > max_length) {
+				const cat_esc = frappe.utils.escape_html(type || "");
+				$(`<button type="button" class="btn btn-default btn-xs mt-2 list-more" data-search="${fetch_type}"
+					data-category="${cat_esc}" data-count="${max_length}">
+						${__("More")}
+				</button>`).appendTo($results_list.find(".result-body"));
+			}
 		}
 		return $results_list;
-	},
+	}
 
-	add_section_to_summary: function(type, results) {
-		var me = this;
-		var are_expansive = false;
-		var margin_more = "10px";
-		for(var i = 0; i < results.length; i++) {
-			if(results[i]["description" || "image" || "subtypes"] || false) {
-				are_expansive = true;
-				break;
+	/** Adds a section to the summary: shows the results in a table. */
+	add_section_to_summary(type, results, fetch_type) {
+		if (fetch_type === "Global") {
+			const results_word = results.length === 1 ? __("result") : __("results");
+			let title_row = __(type) + " (" + results.length + " " + results_word + ")";
+			let $result_section =
+				$(`<div class="col-sm-12 result-section global-summary" data-type="${type || ""}">
+				<div class="result-title">${title_row}</div>
+				<div class="result-body">
+				</div>
+			</div>`).appendTo(this.full_lists["All Results"]);
+
+			const $panel = this.build_global_search_table_panel(
+				type,
+				results,
+				this.current_keyword,
+				{}
+			);
+			$result_section.find(".result-body").append($panel);
+
+			const min_show = GLOBAL_SEARCH_SUMMARY_SHOW_MORE_MIN;
+			if (results.length >= min_show) {
+				const dt_esc = frappe.utils.escape_html(type || "");
+				const $btn = $("<button>", {
+					type: "button",
+					class: "btn btn-default btn-xs section-more mt-2",
+				})
+					.attr("data-fetch-type", "Global")
+					.attr("data-category", dt_esc)
+					.text(__("Show more"));
+				const $wrap = $('<div class="global-search-summary-show-more">').append($btn);
+				$result_section.find(".result-body").append($wrap);
 			}
-		}
-		if(results[0].image) margin_more = "20px";
-		var [section_length, col_width] = are_expansive ? [3, "12"] : [4, "6"];
-
-		// check state of last summary section
-		if(this.full_lists['All Results'].find('.module-section').last().find('.col-sm-6').length !== 1
-			|| are_expansive) {
-			this.full_lists['All Results'].append($('<div class="row module-section"></div>'));
-		}
-		var $results_col = $(`<div class="col-sm-${col_width} module-section-column" data-type="${type}">
-			<div class="h4 section-head">${type}</div>
-			<div class="section-body"></div>
-			</div>`);
-		results.slice(0, section_length).forEach(function(result) {
-			$results_col.append(me.render_result(type, result));
-		});
-		if(results.length > section_length) {
-			$results_col.append(`<div style="margin-top:${margin_more}"><a class="section-more small"
-				data-category="${type}">${__("More...")}</a></div>`);
+			return;
 		}
 
-		this.full_lists['All Results'].find('.module-section').last().append($results_col);
-	},
+		let section_length = 4;
+		let more_html = "";
+		let get_result_html = (result) => this.render_result(type, result);
 
-	render_result: function(type, result) {
-		var $result = $('<div class="result '+ type +'-result"></div>');
-
-		function get_link(result) {
-			var link;
-			if(result.route) {
-				link = 'href="#'+result.route.join('/')+'" ';
-			} else if (result.data_path) {
-				link = 'data-path="'+result.data_path+'"';
-			} else {
-				link = "";
-			}
-			return link;
+		if (results.length > section_length) {
+			const cat_esc = frappe.utils.escape_html(type || "");
+			more_html = `<div>
+				<button type="button" class="btn btn-default btn-xs section-more mt-2" data-fetch-type="Nav" data-category="${cat_esc}">${__(
+				"More"
+			)}</button>
+			</div>`;
 		}
 
-		if(result.image) {
-			$result.append('<div class="result-image"><img data-name="' + result.label + '" src="'+ result.image +'" alt="' + result.label + '"></div>');
-		} else if (result.image === null) {
-			$result.append('<div class="result-image"><div class="flex-text"><span>'+ frappe.get_abbr(result.label) +'</span></div></div>');
+		let $result_section = $(`<div class="col-sm-12 result-section" data-type="${type || ""}">
+			<div class="result-title">${__(type)}</div>
+			<div class="result-body">
+				${more_html}
+			</div>
+		</div>`).appendTo(this.full_lists["All Results"]);
+
+		$result_section
+			.find(".result-body")
+			.prepend(results.slice(0, section_length).map(get_result_html));
+	}
+
+	/** Returns the link for a result: shows the result in a table. */
+	get_link(result) {
+		let link = "";
+		if (result.route) {
+			link = `href="${frappe.router.make_url(result.route)}"`;
+		} else if (result.data_path) {
+			link = `data-path="${result.data_path}"`;
+		}
+		return link;
+	}
+
+	render_result(type, result) {
+		let image_html = "";
+		if (result.image !== undefined) {
+			let avatar_html = frappe.get_avatar("avatar-medium", result.label, result.image);
+			image_html = `<a ${this.get_link(result)}>
+				<div class="result-image">
+					${avatar_html}
+				</div>
+			</a>`;
 		}
 
-		var title_html = '<a '+ get_link(result) +' class="module-section-link small">'+ result.label +'</a>';
-		var $result_text = $('<div style="display: inline-block;"></div>');
-		if(result.description) {
-			$result_text.append($('<b>' + title_html + '</b>'));
-			$result_text.append('<p class="small">'+ result.description +'</p>');
-		} else {
-			$result_text.append($(title_html));
-			if(result.route_options) {
-				frappe.route_options = result.route_options;
-			}
-			$result_text.on('click', (e) => {
-				this.search_dialog.hide();
-				if(result.onclick) {
-					result.onclick(result.match);
-				} else {
-					var previous_hash = window.location.hash;
-					frappe.set_route(result.route);
+		let link_html = `<a ${this.get_link(result)} class="result-section-link">${
+			result.label
+		}</a>`;
+		let title_html = !result.description
+			? link_html
+			: `<b>${link_html}</b><div class="description"> ${result.description} </div>`;
 
-					// hashchange didn't fire!
-					if (window.location.hash == previous_hash) {
-						frappe.route();
-					}
-				}
-			});
-		}
+		let result_text = `<div class="result-text">
+			${title_html}
+		</div>`;
 
-		$result.append($result_text);
+		let $result = $(`<div class="result ${type}-result">
+			${image_html}
+			${result_text}
+			${result.subtypes || ""}
+		</div>`);
 
-		if(result.subtypes) {
-			result.subtypes.forEach(function(subtype) {
-				$result.append(subtype);
-			});
+		if (!result.description) {
+			this.handle_result_click(result, $result);
 		}
 
 		return $result;
-	},
+	}
 
-	add_more_results: function(results_set) {
-		var me = this;
-		var more_results = $('<div class="more-results last"></div>');
-		results_set[0].results.forEach(function(result) {
-			more_results.append(me.render_result(results_set[0].title, result));
+	handle_result_click(result, $result) {
+		$result.on("click", () => {
+			if (result.onclick) {
+				result.onclick(result.match);
+			} else {
+				this._open_search_result_route(result);
+			}
 		});
-		this.$modal_body.find('.list-more').before(more_results);
+	}
 
-		if(results_set[0].results.length < this.more_count) {
-			// hide more button and add a result count
-			this.$modal_body.find('.list-more').hide();
-			var no_of_results = this.$modal_body.find('.result').length;
-			var no_of_results_cue = $('<p class="results-status text-muted small">'+
-				no_of_results +' results found</p>');
-			this.$modal_body.find(".more-results:last").append(no_of_results_cue);
+	/** Adds more rows to the global search table panel: shows the results in a table. */
+	add_more_global_table_rows(doctype, results_sets, $trigger, $list) {
+		const set_entry = results_sets[0];
+		if (
+			!set_entry ||
+			!set_entry.results ||
+			!set_entry.results.length ||
+			!$list ||
+			!$list.length
+		) {
+			return;
 		}
-		this.$modal_body.find('.more-results.last').slideDown(200, function() {});
-	},
-
-	// Search objects
-	searches: {
-		global_search: {
-			input_placeholder: __("Global Search"),
-			empty_state_text: __("Search for anything"),
-			no_results_status: (keyword) => __("<p>No results found for '" + keyword + "' in Global Search</p>"),
-
-			get_results: function(keywords, callback) {
-				var start = 0, limit = 100;
-				var results = frappe.search.utils.get_nav_results(keywords);
-				frappe.search.utils.get_global_results(keywords, start, limit)
-					.then(function(global_results) {
-						results = results.concat(global_results);
-						return frappe.search.utils.get_help_results(keywords);
-					}).then(function(help_results) {
-						results = results.concat(help_results);
-						callback(results, keywords);
-					}, function (err) {
-						console.error(err);
-					});
-			}
-		},
-		help: {
-			input_placeholder: __("Search Help"),
-			empty_state_text: __("Search the docs"),
-			no_results_status: (keyword) => __("<p>No results found for '" + keyword +
-				"' in Help</p><p>Would you like to search <a class='switch-to-global-search text-muted' "+
-				"style='text-decoration: underline;'>globally</a>" +
-				" or the <a href='https://discuss.erpnext.com' class='forum-link text-muted' " +
-				"style='text-decoration: underline;'>forums</a> instead?</p>"),
-
-			get_results: function(keywords, callback) {
-				var results = [];
-				frappe.search.utils.get_help_results(keywords)
-					.then(function(help_results) {
-						results = results.concat(help_results);
-						callback(results, keywords);
-					}, function (err) {
-						console.error(err);
-					});
-			}
+		const cols = [];
+		$list
+			.find(".list-row-head .list-row-col")
+			.slice(1)
+			.each(function () {
+				cols.push($(this).find("span").first().text());
+			});
+		const keywords = this.current_keyword;
+		set_entry.results.forEach((r) =>
+			this.append_global_result_list_row(
+				r,
+				cols,
+				keywords,
+				set_entry.title || doctype,
+				$list
+			)
+		);
+		if (set_entry.results.length < this.more_count) {
+			$trigger.hide();
+			let total_rows = Math.max(0, $list.children(".list-row-container").length - 1);
+			const status_word = total_rows === 1 ? __("result") : __("results");
+			$('<div class="results-status">')
+				.text(`${total_rows} ${status_word}`)
+				.insertAfter($trigger);
 		}
-	},
+	}
 
-});
+	add_more_results(results_set) {
+		let more_results = $('<div class="more-results last"></div>');
+		if (results_set[0].results) {
+			results_set[0].results.forEach((result) => {
+				more_results.append(this.render_result(results_set[0].title, result));
+			});
+		}
+		this.$body.find(".list-more").before(more_results);
+
+		if (results_set[0].results.length < this.more_count) {
+			this.$body.find(".list-more").hide();
+			let no_of_results = this.$body.find(".result").length;
+			const cue_word = no_of_results === 1 ? __("result") : __("results");
+			let no_of_results_cue = $('<div class="results-status">').text(
+				`${no_of_results} ${cue_word} ${__("found")}`
+			);
+			this.$body.find(".more-results:last").append(no_of_results_cue);
+		}
+		this.$body.find(".more-results.last").slideDown(200);
+	}
+};

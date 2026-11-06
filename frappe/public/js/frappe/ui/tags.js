@@ -1,119 +1,161 @@
 // Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 // MIT License. See license.txt
 
-frappe.ui.TagEditor = Class.extend({
-	init: function(opts) {
-		/* docs:
-		Arguments
+frappe.ui.Tags = class {
+	constructor({ parent, placeholder, tagsList, onTagAdd, onTagRemove, onTagClick, onChange }) {
+		this.tagsList = tagsList || [];
+		this.onTagAdd = onTagAdd;
+		this.onTagRemove = onTagRemove;
+		this.onTagClick = onTagClick;
+		this.onChange = onChange;
 
-		- parent
-		- user_tags
-		- doctype
-		- docname
-		*/
-		$.extend(this, opts);
-		var me = this;
-		this.wrapper = $('<div class="tag-line" style="position: relative">').appendTo(this.parent)
-		if(!this.wrapper.length) return;
-		var id = frappe.dom.set_unique_id(this.wrapper);
-		this.taggle = new Taggle(id, {
-			placeholder: __('Add a tag') + "...",
-			onTagAdd: function(e, tag) {
-				if(me.initialized && !me.refreshing) {
-					tag = toTitle(tag);
-					return frappe.call({
-						method: 'frappe.desk.tags.add_tag',
-						args: me.get_args(tag),
-						callback: function(r) {
-							var user_tags = me.user_tags.split(",");
-							user_tags.push(tag)
-							me.user_tags = user_tags.join(",");
-							me.on_change && me.on_change(me.user_tags);
-						}
-					});
-				}
-			},
-			onTagRemove: function(e, tag) {
-				if(!me.refreshing) {
-					return frappe.call({
-						method: 'frappe.desk.tags.remove_tag',
-						args: me.get_args(tag),
-						callback: function(r) {
-							var user_tags = me.user_tags.split(",");
-							user_tags.splice(user_tags.indexOf(tag), 1);
-							me.user_tags = user_tags.join(",");
-							me.on_change && me.on_change(me.user_tags);
-						}
-					});
-				}
+		this.setup(parent, placeholder);
+	}
+
+	setup(parent, placeholder) {
+		this.$ul = parent;
+		this.$input = $(`<input class="tags-input form-control mt-2"></input>`);
+
+		this.$inputWrapper = this.get_list_element(this.$input);
+		this.$placeholder =
+			$(`<button type="button" class="es-button add-tags-btn" data-variant="ghost" data-icon-button="true" title="${__(
+				"Add Tags"
+			)}" aria-label="${__("Add Tags")}">
+				${__(placeholder)}
+			</button>`);
+		this.$placeholder.appendTo(this.$ul.find(".form-sidebar-items"));
+		this.$inputWrapper.appendTo(this.$ul);
+
+		this.deactivate();
+		this.bind();
+		this.boot();
+	}
+
+	bind() {
+		const me = this;
+		const select_tag = function () {
+			const tagValue = frappe.utils.xss_sanitise(me.$input.val());
+			me.addTag(tagValue);
+			me.$input.val("");
+		};
+
+		const activate_input = () => {
+			this.activate();
+			this.$input.focus();
+		};
+
+		this.$input.keypress((e) => {
+			if (e.which == 13 || e.keyCode == 13) {
+				// Triggers event when <enter> is pressed
+				this.$input.trigger("enter-pressed-in-addtag");
 			}
 		});
-		if (!this.user_tags) {
-			this.user_tags = "";
+		this.$input.focusout(select_tag);
+
+		this.$input.on("input-selected", () => {
+			// Adds tag if a input is selected
+			select_tag();
+			this.deactivate();
+		});
+
+		this.$input.on("blur", () => {
+			this.deactivate();
+		});
+
+		this.$placeholder.on("click", activate_input);
+		this.$ul.find(".tags-label").on("click", activate_input);
+	}
+
+	boot() {
+		this.addTags(this.tagsList);
+	}
+
+	activate() {
+		this.$placeholder.hide();
+		this.$inputWrapper.show();
+	}
+
+	deactivate() {
+		this.$inputWrapper.hide();
+		this.$placeholder.show();
+	}
+
+	addTag(label) {
+		if (label && label !== "" && !this.tagsList.includes(label)) {
+			let $tag = this.get_tag(label);
+			let row = this.get_list_element($tag, "form-tag-row");
+			row.insertAfter(this.$inputWrapper);
+			this.tagsList.push(label);
+			this.onTagAdd && this.onTagAdd(label);
 		}
-		this.initialized = true;
-		this.refresh(this.user_tags);
-		this.setup_awesomplete();
-	},
-	setup_awesomplete: function() {
-		var me = this;
-		var $input = this.wrapper.find("input.taggle_input");
-		var input = $input.get(0);
-		this.awesomplete = new Awesomplete(input, {
-			minChars: 0,
-			maxItems: 99,
-			list: []
+	}
+
+	removeTag(label) {
+		label = frappe.utils.xss_sanitise(label);
+		if (this.tagsList.includes(label)) {
+			this.tagsList.splice(this.tagsList.indexOf(label), 1);
+			this.onTagRemove && this.onTagRemove(label);
+		}
+	}
+
+	addTags(labels) {
+		labels.map(this.addTag.bind(this));
+	}
+
+	clearTags() {
+		this.$ul.find(".form-tag-row").remove();
+		this.tagsList = [];
+	}
+
+	get_list_element($element, class_name = "") {
+		let $li = $(`<div class="${class_name}"></div>`);
+		$element.appendTo($li);
+		return $li;
+	}
+
+	get_tag(label) {
+		let $tag = frappe.ui.badge({
+			label: label,
+			theme: this.get_tag_theme(label),
+			size: "lg",
+			icon_right: "x",
+			css_class: "form-tag",
+			title: label,
 		});
-		$input.on("awesomplete-open", function(e){
-			$input.attr('state', 'open');
-		});
-		$input.on("awesomplete-close", function(e){
-			$input.attr('state', 'closed');
-		});
-		$input.on("input", function(e) {
-			var value = e.target.value;
-			frappe.call({
-				method:"frappe.desk.tags.get_tags",
-				args:{
-					doctype: me.frm.doctype,
-					txt: value.toLowerCase(),
-					cat_tags:JSON.stringify(me.list_sidebar.get_cat_tags())
-				},
-				callback: function(r) {
-					me.awesomplete.list = r.message;
+
+		// the badge's label span; also the onTagClick target
+		$tag.find(".es-badge__label").addClass("pill-label ellipsis");
+
+		// the ✕ is the only click target — the badge itself stays inert
+		const $remove = $tag.find(".es-badge__affix");
+		$remove
+			.attr({ role: "button", tabindex: 0, "aria-label": __("Remove") })
+			.on("click", () => {
+				this.removeTag(label);
+				$tag.closest(".form-tag-row").remove();
+			})
+			.on("keydown", (e) => {
+				if (e.key === "Enter" || e.key === " ") {
+					e.preventDefault();
+					$remove.trigger("click");
 				}
 			});
-		});
-		$input.on("focus", function(e) {
-			if($input.attr('state') != 'open') {
-				$input.trigger("input");
-			}
-		});
-	},
-	get_args: function(tag) {
-		return {
-			tag: tag,
-			dt: this.frm.doctype,
-			dn: this.frm.docname,
-		}
-	},
-	refresh: function(user_tags) {
-		var me = this;
-		if(!me.initialized || me.refreshing)
-			return;
 
-		me.refreshing = true;
-		try {
-			me.taggle.removeAll();
-			if(user_tags) {
-				me.taggle.add(user_tags.split(','));
-			}
-		} catch(e) {
-			me.refreshing = false;
-			// wtf bug
-			setTimeout( function() { me.refresh(); }, 100);
+		if (this.onTagClick) {
+			$tag.on("click", ".pill-label", () => {
+				this.onTagClick(label);
+			});
 		}
-		me.refreshing = false;
-
+		return $tag;
 	}
-})
+
+	get_tag_theme(label) {
+		// same tag → same color, spread over the badge's curated themes
+		const themes = ["blue", "green", "amber", "red", "violet"];
+		let hash = 0;
+		for (let i = 0; i < label.length; i++) {
+			hash = (hash * 31 + label.charCodeAt(i)) % 997;
+		}
+		return themes[hash % themes.length];
+	}
+};

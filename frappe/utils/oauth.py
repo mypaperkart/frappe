@@ -1,141 +1,268 @@
-# Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
-# MIT License. See license.txt
+# Copyright (c) 2022, Frappe Technologies Pvt. Ltd. and Contributors
+# License: MIT. See LICENSE
 
-from __future__ import unicode_literals
+import hmac
+import json
+from collections.abc import Callable
+from functools import lru_cache
+from typing import TYPE_CHECKING
+from urllib.parse import urlparse
+
 import frappe
 import frappe.utils
-import json
 from frappe import _
+from frappe.apps import get_default_path
+from frappe.utils.password import get_decrypted_password
+from frappe.website.utils import get_home_page
 
-class SignupDisabledError(frappe.PermissionError): pass
+if TYPE_CHECKING:
+	from frappe.core.doctype.user.user import User
 
-def get_oauth2_providers():
-	out = {
-		"google": {
+
+class SignupDisabledError(frappe.PermissionError): ...
+
+
+# Microsoft signs Office 365 id_tokens (both v1.0 and v2.0) with keys published here,
+# regardless of which tenant issued the token.
+OFFICE_365_JWKS_URI = "https://login.microsoftonline.com/common/discovery/keys"
+
+
+@lru_cache(maxsize=1)
+def _get_office_365_jwks_client():
+	from jwt import PyJWKClient
+
+	return PyJWKClient(OFFICE_365_JWKS_URI, cache_keys=True)
+
+
+def get_verified_office_365_claims(token: str, client_id: str) -> dict:
+	"""Decode an Office 365 id_token, verifying its Microsoft-issued signature and audience.
+
+	Unlike a same-tenant assumption, this does NOT verify that the token came from any
+	particular organization's Entra tenant, since the token could legitimately come from any
+	tenant (the /common endpoint is inherently multi-tenant). Tenant restriction is enforced
+	separately, by checking the returned "tid" claim against the Social Login Key's
+	configured Tenant ID.
+	"""
+	import jwt
+
+	signing_key = _get_office_365_jwks_client().get_signing_key_from_jwt(token)
+	return jwt.decode(token, signing_key.key, algorithms=["RS256"], audience=client_id)
+
+
+def enforce_office_365_tenant(info: dict, provider: str) -> None:
+	"""Reject the login unless it comes from a tenant this Social Login Key trusts.
+
+	Office 365's default endpoint (/common) is multi-tenant: a validly-signed token can
+	legitimately come from any Entra tenant, not just this organization's. The token's
+	signature and audience don't distinguish one tenant from another, so the "tid" claim
+	is checked separately against the Social Login Key's configured Tenant ID.
+	"""
+	tenant_id, trust_any_tenant = frappe.db.get_value(
+		"Social Login Key", provider, ["tenant_id", "trust_any_tenant"]
+	)
+
+	if trust_any_tenant:
+		return
+
+	if not tenant_id:
+		frappe.throw(
+			_(
+				"This Office 365 Social Login Key is not restricted to a specific tenant. "
+				"Set a Tenant ID, or enable 'Trust Any Tenant' if you intend to allow sign-in "
+				"from any organization."
+			)
+		)
+
+	if info.get("tid") != tenant_id:
+		frappe.throw(_("This Microsoft account does not belong to the expected organization."))
+
+
+def build_oauth_url(base_url: str, url: str | None = None) -> str:
+	"""
+	Build a complete OAuth authorization URL.
+
+	This helper constructs a full OAuth URL starting from a given base URL.
+
+	If `url` is omitted, the function simply returns the normalized base URL.  If the
+	`url` contains the relative or absolute path, the function will return this
+	appended to the base URL.  If the `url` contains a `scheme` (e.g. "https://" and a
+	`netloc` (e.g. "www.example.com")), the function will return the passed `url` alone.
+
+	Args:
+		base_url (str): The base OAuth endpoint (e.g. "https://example.com").
+		url (str | None): An optional path or override URL to combine with the base.
+
+	Returns:
+		str: The fully qualified OAuth URL ready for use in redirects or API calls.
+	"""
+	if url is None:
+		return base_url
+	parsed = urlparse(url)
+	if not (parsed.scheme and parsed.netloc):
+		return base_url + url
+	return url
+
+
+def get_oauth2_providers() -> dict[str, dict]:
+	out = {}
+	providers = frappe.get_all("Social Login Key", fields=["*"])
+	for provider in providers:
+		authorize_url, access_token_url, api_endpoint_url = (
+			provider.authorize_url,
+			provider.access_token_url,
+			provider.api_endpoint,
+		)
+
+		if provider.custom_base_url:
+			authorize_url = build_oauth_url(provider.base_url, provider.authorize_url)
+			access_token_url = build_oauth_url(provider.base_url, provider.access_token_url)
+			api_endpoint_url = build_oauth_url(provider.base_url, provider.api_endpoint)
+
+		out[provider.name] = {
 			"flow_params": {
-				"name": "google",
-				"authorize_url": "https://accounts.google.com/o/oauth2/auth",
-				"access_token_url": "https://accounts.google.com/o/oauth2/token",
-				"base_url": "https://www.googleapis.com",
+				"name": provider.name,
+				"authorize_url": authorize_url,
+				"access_token_url": access_token_url,
+				"base_url": provider.base_url,
 			},
-
-			"redirect_uri": "/api/method/frappe.www.login.login_via_google",
-
-			"auth_url_data": {
-				"scope": "https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email",
-				"response_type": "code"
-			},
-
-			# relative to base_url
-			"api_endpoint": "oauth2/v2/userinfo"
-		},
-
-		"github": {
-			"flow_params": {
-				"name": "github",
-				"authorize_url": "https://github.com/login/oauth/authorize",
-				"access_token_url": "https://github.com/login/oauth/access_token",
-				"base_url": "https://api.github.com/"
-			},
-
-			"redirect_uri": "/api/method/frappe.www.login.login_via_github",
-
-			# relative to base_url
-			"api_endpoint": "user"
-		},
-
-		"facebook": {
-			"flow_params": {
-				"name": "facebook",
-				"authorize_url": "https://www.facebook.com/dialog/oauth",
-				"access_token_url": "https://graph.facebook.com/oauth/access_token",
-				"base_url": "https://graph.facebook.com"
-			},
-
-			"redirect_uri": "/api/method/frappe.www.login.login_via_facebook",
-
-			"auth_url_data": {
-				"display": "page",
-				"response_type": "code",
-				"scope": "email,public_profile"
-			},
-
-			# relative to base_url
-			"api_endpoint": "/v2.5/me",
-			"api_endpoint_args": {
-				"fields": "first_name,last_name,email,gender,location,verified,picture"
-			},
+			"redirect_uri": provider.redirect_url,
+			"api_endpoint": api_endpoint_url,
 		}
-	}
+		if provider.auth_url_data:
+			out[provider.name]["auth_url_data"] = json.loads(provider.auth_url_data)
 
-	frappe_server_url = frappe.db.get_value("Social Login Keys", None, "frappe_server_url")
-	if frappe_server_url:
-		out['frappe'] = {
-			"flow_params": {
-				"name": "frappe",
-				"authorize_url": frappe_server_url + "/api/method/frappe.integrations.oauth2.authorize",
-				"access_token_url": frappe_server_url + "/api/method/frappe.integrations.oauth2.get_token",
-				"base_url": frappe_server_url
-			},
-
-			"redirect_uri": "/api/method/frappe.www.login.login_via_frappe",
-
-			"auth_url_data": {
-				"response_type": "code",
-				"scope": "openid"
-			},
-
-			# relative to base_url
-			"api_endpoint": "/api/method/frappe.integrations.oauth2.openid_profile"
-		}
+		if provider.api_endpoint_args:
+			out[provider.name]["api_endpoint_args"] = json.loads(provider.api_endpoint_args)
 
 	return out
 
-def get_oauth_keys(provider):
+
+def get_oauth_keys(provider: str) -> dict[str, str]:
 	"""get client_id and client_secret from database or conf"""
 
-	# try conf
-	keys = frappe.conf.get("{provider}_login".format(provider=provider))
+	if keys := frappe.conf.get(f"{provider}_login"):
+		return {"client_id": keys["client_id"], "client_secret": keys["client_secret"]}
 
-	if not keys:
-		# try database
-		social = frappe.get_doc("Social Login Keys", "Social Login Keys")
-		keys = {}
-		for fieldname in ("client_id", "client_secret"):
-			value = social.get("{provider}_{fieldname}".format(provider=provider, fieldname=fieldname))
-			if not value:
-				keys = {}
-				break
-			keys[fieldname] = value
-
-		return keys
-
-	else:
-		return {
-			"client_id": keys["client_id"],
-			"client_secret": keys["client_secret"]
-		}
-
-def get_oauth2_authorize_url(provider):
-	flow = get_oauth2_flow(provider)
-
-	state = { "site": frappe.utils.get_url(), "token": frappe.generate_hash() }
-	frappe.cache().set_value("{0}:{1}".format(provider, state["token"]), True, expires_in_sec=120)
-
-	# relative to absolute url
-	data = {
-		"redirect_uri": get_redirect_uri(provider),
-		"state": json.dumps(state)
+	return {
+		"client_id": frappe.db.get_value("Social Login Key", provider, "client_id"),
+		"client_secret": get_decrypted_password("Social Login Key", provider, "client_secret"),
 	}
 
+
+OAUTH_LOGIN_FLOW_CACHE_PREFIX = "frappe_oauth_login"
+OAUTH_LOGIN_BINDING_COOKIE = "oauth_login_binding"
+
+
+def _set_oauth_binding_cookie(binding_secret: str, cross_site: bool = False) -> None:
+	frappe.local.cookie_manager.set_cookie(
+		OAUTH_LOGIN_BINDING_COOKIE,
+		binding_secret,
+		max_age=600,
+		httponly=True,
+		# a form_post callback is a cross-site POST, which a Lax cookie is not sent on;
+		# SameSite=None is only accepted by browsers together with Secure
+		samesite="None" if cross_site and frappe.local.request.scheme == "https" else "Lax",
+	)
+
+
+def _get_or_create_oauth_binding_secret(cross_site: bool = False) -> str:
+	"""Return the browser-binding secret for this login attempt, minting one if needed.
+
+	Reuses an already-issued secret rather than replacing it, so that concurrent login
+	attempts from one browser stay redeemable:
+
+	- one already set earlier in this request: `/login` renders a button per enabled
+	  Social Login Key and each calls `create_oauth_state`, so minting per call would
+	  leave only the last provider's button working;
+	- one the browser already holds: re-rendering `/login` (a refresh, a second tab)
+	  would otherwise orphan the states from the earlier render.
+	"""
+	pending = frappe.local.cookie_manager.cookies.get(OAUTH_LOGIN_BINDING_COOKIE)
+	if pending and not cross_site:
+		return pending["value"]
+
+	# Re-set a held cookie so it keeps outliving the states minted against it. A provider
+	# that needs it cross-site upgrades one already queued by another button on this page.
+	binding_secret = (
+		pending["value"]
+		if pending
+		else frappe.local.request.cookies.get(OAUTH_LOGIN_BINDING_COOKIE) or frappe.generate_hash(length=32)
+	)
+	_set_oauth_binding_cookie(binding_secret, cross_site)
+	return binding_secret
+
+
+def create_oauth_state(redirect_to: str | None, cross_site: bool = False) -> str:
+	"""Create a single-use token referencing this login attempt's `redirect_to`.
+
+	The returned token is what gets sent to the OAuth provider as `state`. This request's
+	browser-binding secret is handed to the browser as an HttpOnly cookie and only its hash
+	is kept server-side, so `consume_oauth_state` can later tell whether the browser
+	completing the callback is the same one that started this login attempt.
+	"""
+	state = frappe.generate_hash(length=32)
+	binding_hash = frappe.utils.sha256_hash(_get_or_create_oauth_binding_secret(cross_site))
+
+	frappe.cache.set_value(
+		f"{OAUTH_LOGIN_FLOW_CACHE_PREFIX}:{state}",
+		{"redirect_to": redirect_to or "", "binding_hash": binding_hash},
+		expires_in_sec=600,
+	)
+	return state
+
+
+def consume_oauth_state(state: str) -> str | None:
+	"""Look up and invalidate the redirect_to stored for this login attempt.
+
+	Returns None if `state` doesn't reference a known, unused login attempt, or if the
+	request completing the callback doesn't carry the binding cookie set for it -
+	i.e. it isn't the browser that started this login attempt.
+
+	Single use belongs to the state, which is deleted here. The binding cookie is
+	deliberately not: it identifies the browser rather than one attempt, is shared by
+	every attempt that browser has in flight, and expires on its own.
+	"""
+	if not state:
+		return None
+	key = f"{OAUTH_LOGIN_FLOW_CACHE_PREFIX}:{state}"
+	data = frappe.cache.get_value(key)
+	frappe.cache.delete_value(key)
+
+	# A state minted before this binding shipped is a plain `redirect_to` string, and can
+	# still be in flight for its 600s lifetime across an upgrade. Treat it as expired
+	# rather than indexing a string and raising.
+	if not isinstance(data, dict):
+		return None
+
+	presented_secret = frappe.local.request.cookies.get(OAUTH_LOGIN_BINDING_COOKIE, "")
+	if not presented_secret or not hmac.compare_digest(
+		frappe.utils.sha256_hash(presented_secret), data.get("binding_hash") or ""
+	):
+		return None
+
+	return data.get("redirect_to")
+
+
+def get_oauth2_authorize_url(provider: str, redirect_to: str) -> str:
+	flow = get_oauth2_flow(provider)
+
 	oauth2_providers = get_oauth2_providers()
+	auth_url_data = oauth2_providers[provider].get("auth_url_data", {})
+
+	state = create_oauth_state(redirect_to, cross_site=auth_url_data.get("response_mode") == "form_post")
+
+	data = {
+		"redirect_uri": get_redirect_uri(provider),
+		"state": state,
+	}
 
 	# additional data if any
-	data.update(oauth2_providers[provider].get("auth_url_data", {}))
+	data.update(auth_url_data)
 
 	return flow.get_authorize_url(**data)
 
-def get_oauth2_flow(provider):
+
+def get_oauth2_flow(provider: str):
 	from rauth import OAuth2Service
 
 	# get client_id and client_secret
@@ -149,26 +276,37 @@ def get_oauth2_flow(provider):
 	# and we have setup the communication lines
 	return OAuth2Service(**params)
 
-def get_redirect_uri(provider):
-	keys = frappe.conf.get("{provider}_login".format(provider=provider))
+
+def get_redirect_uri(provider: str) -> str:
+	keys = frappe.conf.get(f"{provider}_login")
 
 	if keys and keys.get("redirect_uri"):
 		# this should be a fully qualified redirect uri
 		return keys["redirect_uri"]
 
-	else:
-		oauth2_providers = get_oauth2_providers()
+	oauth2_providers = get_oauth2_providers()
+	redirect_uri = oauth2_providers[provider]["redirect_uri"]
 
-		redirect_uri = oauth2_providers[provider]["redirect_uri"]
+	# this uses the site's url + the relative redirect uri
+	return frappe.utils.get_url(redirect_uri)
 
-		# this uses the site's url + the relative redirect uri
-		return frappe.utils.get_url(redirect_uri)
 
-def login_via_oauth2(provider, code, state, decoder=None):
+def login_via_oauth2(provider: str, code: str, state: str, decoder: Callable | None = None):
 	info = get_info_via_oauth(provider, code, decoder)
 	login_oauth_user(info, provider=provider, state=state)
 
-def get_info_via_oauth(provider, code, decoder=None):
+
+def login_via_oauth2_id_token(provider: str, code: str, state: str, decoder: Callable | None = None):
+	info = get_info_via_oauth(provider, code, decoder, id_token=True)
+	login_oauth_user(info, provider=provider, state=state)
+
+
+def get_info_via_oauth(provider: str, code: str, decoder: Callable | None = None, id_token: bool = False):
+	import jwt
+
+	if not frappe.db.get_value("Social Login Key", provider, "enable_social_login"):
+		frappe.throw(_("Login with {0} is not enabled").format(provider.title()), frappe.PermissionError)
+
 	flow = get_oauth2_flow(provider)
 	oauth2_providers = get_oauth2_providers()
 
@@ -176,7 +314,7 @@ def get_info_via_oauth(provider, code, decoder=None):
 		"data": {
 			"code": code,
 			"redirect_uri": get_redirect_uri(provider),
-			"grant_type": "authorization_code"
+			"grant_type": "authorization_code",
 		}
 	}
 
@@ -185,51 +323,90 @@ def get_info_via_oauth(provider, code, decoder=None):
 
 	session = flow.get_auth_session(**args)
 
-	api_endpoint = oauth2_providers[provider].get("api_endpoint")
-	api_endpoint_args = oauth2_providers[provider].get("api_endpoint_args")
-	info = session.get(api_endpoint, params=api_endpoint_args).json()
+	if id_token:
+		parsed_access = json.loads(session.access_token_response.text)
+		token = parsed_access["id_token"]
 
-	if (("verified_email" in info and not info.get("verified_email"))
-		or ("verified" in info and not info.get("verified"))):
-		frappe.throw(_("Email not verified with {1}").format(provider.title()))
+		if provider == "office_365":
+			client_id = get_oauth_keys(provider)["client_id"]
+			info = get_verified_office_365_claims(token, client_id)
+			enforce_office_365_tenant(info, provider)
+
+			if "email_verified" not in info:
+				# Azure AD's id_token doesn't emit this claim; having verified the signature
+				# and pinned the issuing tenant above, this organization's own directory data
+				# is trusted.
+				info["email_verified"] = True
+		else:
+			info = jwt.decode(token, flow.client_secret, options={"verify_signature": False})
+
+	else:
+		api_endpoint = oauth2_providers[provider].get("api_endpoint")
+		api_endpoint_args = oauth2_providers[provider].get("api_endpoint_args")
+		info = session.get(api_endpoint, params=api_endpoint_args).json()
+
+		if provider == "github":
+			if info.get("email"):
+				# GitHub only allows a verified address to be set as the public profile email.
+				info["email_verified"] = True
+			else:
+				emails = session.get("/user/emails", params=api_endpoint_args).json()
+				email_dict = next(filter(lambda x: x.get("primary"), emails), None)
+				if email_dict:
+					info["email"] = email_dict.get("email")
+					info["email_verified"] = email_dict.get("verified", False)
+
+		if provider == "google" and "verified_email" in info:
+			info["email_verified"] = info.get("verified_email")
+
+		if provider == "facebook" and info.get("email"):
+			# Facebook only returns "email" once the user has confirmed it, and the
+			# per-user "verified" field is deprecated/unreliable, so trust presence directly.
+			info["email_verified"] = True
+
+	provider_trusts_unverified_email = frappe.db.get_value(
+		"Social Login Key", provider, "trust_email_without_verified_claim"
+	)
+	if not (
+		get_email(info)
+		and (
+			info.get("email_verified")
+			# never override an explicit "email_verified": false, only its absence
+			or ("email_verified" not in info and provider_trusts_unverified_email)
+		)
+	):
+		frappe.throw(_("Email not verified with {0}").format(provider.title()))
 
 	return info
 
-def login_oauth_user(data=None, provider=None, state=None, email_id=None, key=None, generate_login_token=False):
-	# NOTE: This could lead to security issue as the signed in user can type any email address in complete_signup
-	# if email_id and key:
-	# 	data = json.loads(frappe.db.get_temp(key))
-	#	# What if data is missing because of an invalid key
-	# 	data["email"] = email_id
-	#
-	# elif not (data.get("email") and get_first_name(data)) and not frappe.db.exists("User", data.get("email")):
-	# 	# ask for user email
-	# 	key = frappe.db.set_temp(json.dumps(data))
-	# 	frappe.db.commit()
-	# 	frappe.local.response["type"] = "redirect"
-	# 	frappe.local.response["location"] = "/complete_signup?key=" + key
-	# 	return
 
-	# json.loads data and state
-	if isinstance(data, basestring):
+def login_oauth_user(
+	data: dict | str,
+	*,
+	provider: str | None = None,
+	state: str,
+	generate_login_token: bool = False,
+):
+	if isinstance(data, str):
 		data = json.loads(data)
 
-	if isinstance(state, basestring):
-		state = json.loads(state)
-
-	if not (state and state["token"]):
-		frappe.respond_as_web_page(_("Invalid Request"), _("Token is missing"), http_status_code=417)
+	redirect_to = consume_oauth_state(state)
+	if redirect_to is None:
+		frappe.respond_as_web_page(
+			_("Invalid Request"),
+			_("Your login attempt is invalid or has expired. Please try again."),
+			http_status_code=417,
+		)
 		return
 
-	token = frappe.cache().get_value("{0}:{1}".format(provider, state["token"]), expires=True)
-	if not token:
-		frappe.respond_as_web_page(_("Invalid Request"), _("Invalid Token"), http_status_code=417)
-		return
-
-	user = data["email"]
+	# All user emails are stored as lowercase, but OAuth provider could have it in mixed case.
+	# We pass the email as-is to LoginManager, which could result in a session with an incorrect email.
+	user = get_email(data).lower()
 
 	if not user:
-		frappe.respond_as_web_page(_("Invalid Request"), _("Please ensure that your profile has an email address"))
+		frappe.respond_as_web_page(
+			_("Invalid Request"), _("Please ensure that your profile has an email address")
+		)
 		return
 
 	try:
@@ -237,92 +414,128 @@ def login_oauth_user(data=None, provider=None, state=None, email_id=None, key=No
 			return
 
 	except SignupDisabledError:
-		return frappe.respond_as_web_page("Signup is Disabled", "Sorry. Signup from Website is disabled.",
-			success=False, http_status_code=403)
+		return frappe.respond_as_web_page(
+			"Signup is Disabled",
+			"Sorry. Signup from Website is disabled.",
+			success=False,
+			http_status_code=403,
+		)
 
-	frappe.local.login_manager.user = user
-	frappe.local.login_manager.post_login()
+	for method in frappe.get_hooks("on_social_login"):
+		frappe.get_attr(method)(user=user, provider=provider, claims=data)
+
+	frappe.local.login_manager.login_as(user)
 
 	# because of a GET request!
 	frappe.db.commit()
 
 	if frappe.utils.cint(generate_login_token):
 		login_token = frappe.generate_hash(length=32)
-		frappe.cache().set_value("login_token:{0}".format(login_token), frappe.local.session.sid, expires_in_sec=120)
+		frappe.cache.set_value(f"login_token:{login_token}", frappe.local.session.sid, expires_in_sec=120)
 
 		frappe.response["login_token"] = login_token
 
 	else:
-		redirect_post_login(desk_user=frappe.local.response.get('message') == 'Logged In')
+		redirect_post_login(
+			desk_user=frappe.local.response.get("message") == "Logged In",
+			redirect_to=redirect_to or None,
+			provider=provider,
+		)
 
-def update_oauth_user(user, data, provider):
-	if isinstance(data.get("location"), dict):
-		data["location"] = data.get("location").get("name")
 
-	save = False
+def get_user_record(user: str, data: dict, provider: str) -> "User":
+	from frappe.integrations.doctype.social_login_key.social_login_key import provider_allows_signup
 
-	if not frappe.db.exists("User", user):
-
-		# is signup disabled?
-		if frappe.utils.cint(frappe.db.get_single_value("Website Settings", "disable_signup")):
+	try:
+		return frappe.get_doc("User", user)
+	except frappe.DoesNotExistError:
+		if not provider_allows_signup(provider):
 			raise SignupDisabledError
 
-		save = True
-		user = frappe.new_doc("User")
-		user.update({
-			"doctype":"User",
+	user: User = frappe.new_doc("User")
+
+	if gender := data.get("gender", "").title():
+		frappe.get_doc({"doctype": "Gender", "gender": gender}).insert(
+			ignore_permissions=True, ignore_if_duplicate=True
+		)
+
+	user.update(
+		{
+			"doctype": "User",
 			"first_name": get_first_name(data),
 			"last_name": get_last_name(data),
-			"email": data["email"],
-			"gender": (data.get("gender") or "").title(),
+			"email": get_email(data),
+			"gender": gender,
 			"enabled": 1,
-			"new_password": frappe.generate_hash(data["email"]),
+			"new_password": frappe.generate_hash(),
 			"location": data.get("location"),
 			"user_type": "Website User",
-			"user_image": data.get("picture") or data.get("avatar_url")
-		})
+			"user_image": data.get("picture") or data.get("avatar_url"),
+		}
+	)
 
-	else:
-		user = frappe.get_doc("User", user)
-		if not user.enabled:
-			frappe.respond_as_web_page(_('Not Allowed'), _('User {0} is disabled').format(user.email))
-			return False
+	return user
 
-	if provider=="facebook" and not user.get("fb_userid"):
-		save = True
-		user.update({
-			"fb_username": data.get("username"),
-			"fb_userid": data["id"],
-			"user_image": "https://graph.facebook.com/{id}/picture".format(id=data["id"])
-		})
 
-	elif provider=="google" and not user.get("google_userid"):
-		save = True
-		user.google_userid = data["id"]
+def update_oauth_user(user: str, data: dict, provider: str):
+	if isinstance(data.get("location"), dict):
+		data["location"] = data["location"].get("name")
 
-	elif provider=="github" and not user.get("github_userid"):
-		save = True
-		user.github_userid = data["id"]
-		user.github_username = data["login"]
+	user: User = get_user_record(user, data, provider)
+	update_user_record = user.is_new()
 
-	elif provider=="frappe" and not user.get("frappe_userid"):
-		save = True
-		user.frappe_userid = data["sub"]
+	if not user.enabled:
+		frappe.respond_as_web_page(_("Not Allowed"), _("User {0} is disabled").format(user.email))
+		return False
 
-	if save:
+	if not user.get_social_login_userid(provider):
+		update_user_record = True
+		match provider:
+			case "facebook":
+				user.set_social_login_userid(provider, userid=data["id"], username=data.get("username"))
+				user.update({"user_image": f"https://graph.facebook.com/{data['id']}/picture"})
+			case "google":
+				user.set_social_login_userid(provider, userid=data["id"])
+			case "github":
+				user.set_social_login_userid(provider, userid=data["id"], username=data.get("login"))
+			case "frappe" | "office_365":
+				user.set_social_login_userid(provider, userid=data["sub"])
+			case "salesforce":
+				user.set_social_login_userid(provider, userid="/".join(data["sub"].split("/")[-2:]))
+			case _:
+				user_id_property = (
+					frappe.db.get_value("Social Login Key", provider, "user_id_property") or "sub"
+				)
+				user.set_social_login_userid(provider, userid=data[user_id_property])
+
+	if update_user_record:
 		user.flags.ignore_permissions = True
 		user.flags.no_welcome_mail = True
+
+		if default_role := frappe.db.get_single_value("Portal Settings", "default_role"):
+			user.add_roles(default_role)
+
 		user.save()
 
-def get_first_name(data):
-	return data.get("first_name") or data.get("given_name") or data.get("name")
 
-def get_last_name(data):
+def get_first_name(data: dict) -> str:
+	return data.get("first_name") or data.get("given_name") or data.get("name") or data.get("login")
+
+
+def get_last_name(data: dict) -> str:
 	return data.get("last_name") or data.get("family_name")
 
-def redirect_post_login(desk_user):
-	# redirect!
+
+def get_email(data: dict) -> str:
+	return data.get("email") or data.get("upn") or data.get("unique_name")
+
+
+def redirect_post_login(desk_user: bool, redirect_to: str | None = None, provider: str | None = None):
 	frappe.local.response["type"] = "redirect"
 
-	# the #desktop is added to prevent a facebook redirect bug
-	frappe.local.response["location"] = "/desk#desktop" if desk_user else "/"
+	if not redirect_to:
+		desk_uri = "/desk/workspace" if provider == "facebook" else get_default_path()
+		website_uri = get_default_path() or get_home_page() or "/me"
+		redirect_to = frappe.utils.get_url(desk_uri if desk_user else website_uri)
+
+	frappe.local.response["location"] = redirect_to

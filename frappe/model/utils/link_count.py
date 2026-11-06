@@ -1,38 +1,86 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
-# MIT License. See license.txt
+# License: MIT. See LICENSE
 
-from __future__ import unicode_literals
+from collections import defaultdict
+from random import random
 
 import frappe
 
-ignore_doctypes = ("DocType", "Print Format", "Role", "Module Def", "Communication",
-	"ToDo")
+ignore_doctypes = {
+	"DocType",
+	"Print Format",
+	"Role",
+	"Module Def",
+	"Communication",
+	"ToDo",
+	"Version",
+	"Error Log",
+	"Scheduled Job Log",
+	"Event Sync Log",
+	"Event Update Log",
+	"Access Log",
+	"View Log",
+	"Activity Log",
+	"Notification Log",
+	"Email Queue",
+	"DocShare",
+	"Document Follow",
+	"Console Log",
+	"User",
+}
+
+
+LINK_COUNT_BUFFER_SIZE = 256
+
 
 def notify_link_count(doctype, name):
-	'''updates link count for given document'''
-	link_count = frappe.cache().get_value('_link_count')
-	if not link_count:
-		link_count = {}
+	"""updates link count for given document"""
 
-	if not (doctype, name) in link_count:
-		link_count[(doctype, name)] = 1
-	else:
-		link_count[(doctype, name)] += 1
+	if doctype in ignore_doctypes or not frappe.request or random() < 0.9:  # Sample 10%
+		return
 
-	frappe.cache().set_value('_link_count', link_count)
+	if not hasattr(frappe.local, "_link_count"):
+		frappe.local._link_count = defaultdict(int)
+		frappe.db.after_commit.add(flush_local_link_count)
+
+	frappe.local._link_count[(doctype, name)] += 1
+
+
+def flush_local_link_count():
+	"""flush from local before ending request"""
+	new_links = getattr(frappe.local, "_link_count", None)
+	if not new_links:
+		return
+
+	link_count = frappe.cache.get_value("_link_count") or {}
+
+	flush = False
+	for key, value in new_links.items():
+		if key in link_count:
+			link_count[key] += value
+		elif len(link_count) < LINK_COUNT_BUFFER_SIZE:
+			link_count[key] = value
+		else:
+			continue
+		flush = True
+
+	if flush:
+		frappe.cache.set_value("_link_count", link_count)
+	new_links.clear()
+
 
 def update_link_count():
-	'''increment link count in the `idx` column for the given document'''
-	link_count = frappe.cache().get_value('_link_count')
+	"""increment link count in the `idx` column for the given document"""
+	link_count = frappe.cache.get_value("_link_count")
 
 	if link_count:
-		for key, count in link_count.iteritems():
-			if key[0] not in ignore_doctypes:
-				try:
-					frappe.db.sql('update `tab{0}` set idx = idx + {1} where name=%s'.format(key[0], count),
-						key[1])
-				except Exception, e:
-					if e.args[0]!=1146: # table not found, single
-						raise e
+		for (doctype, name), count in link_count.items():
+			try:
+				table = frappe.qb.DocType(doctype)
+				frappe.qb.update(table).set(table.idx, table.idx + count).where(table.name == name).run()
+				frappe.db.commit()
+			except Exception as e:
+				if not frappe.db.is_table_missing(e):  # table not found, single
+					raise e
 	# reset the count
-	frappe.cache().delete_value('_link_count')
+	frappe.cache.delete_value("_link_count")
